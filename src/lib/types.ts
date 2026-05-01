@@ -33,8 +33,38 @@ export interface Bookmark {
   lastSeenIndex: number;
 }
 
+/**
+ * A source is one of:
+ *   - "bookmarks" — your own bookmark feed (the only kind in phase 0)
+ *   - "user:<handle>" — another user's archived posts (added in phase 1)
+ *
+ * The user-archive variant carries the @handle in the key so multiple users can
+ * coexist in storage and on disk.
+ */
+export type SourceKey = "bookmarks" | `user:${string}`;
+
+export function userSource(handle: string): SourceKey {
+  return `user:${handle.toLowerCase()}` as SourceKey;
+}
+
+export function isUserSource(s: SourceKey): s is `user:${string}` {
+  return s.startsWith("user:");
+}
+
+export function sourceUsername(s: SourceKey): string | null {
+  return isUserSource(s) ? s.slice("user:".length) : null;
+}
+
+/** Folder segment for this source on disk (e.g. "bookmarks" or "users/elonmusk"). */
+export function sourceDiskPath(s: SourceKey): string {
+  if (s === "bookmarks") return "bookmarks";
+  const user = sourceUsername(s);
+  return `users/${user}`;
+}
+
 export interface Manifest {
-  version: 1;
+  version: 2;
+  source: SourceKey;
   bookmarks: Record<string, Bookmark>;
   lastRun: LastRun | null;
 }

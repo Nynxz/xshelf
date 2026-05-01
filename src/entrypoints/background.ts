@@ -14,8 +14,10 @@ import type {
   PendingMediaItem,
   PendingSummary,
   RuntimeState,
+  SourceKey,
   SyncOptions,
 } from "../lib/types";
+import { sourceDiskPath } from "../lib/types";
 import {
   clearManifest,
   clearPending,
@@ -24,6 +26,7 @@ import {
   loadManifest,
   loadPending,
   loadRuntime,
+  migrateLegacyManifest,
   saveCaptured,
   saveManifest,
   savePending,
@@ -124,6 +127,17 @@ export default defineBackground({
 
     // === STARTUP ===
     async function loadPersisted(): Promise<void> {
+      // One-shot migration from the v1 single-manifest layout to v2 multi-source.
+      // Idempotent — flagged in storage so it only runs once per profile.
+      try {
+        const result = await migrateLegacyManifest();
+        if (result.migrated) {
+          appendLog(`Migrated ${result.count} legacy bookmarks to v2 multi-source layout.`);
+        }
+      } catch (e) {
+        appendLog(`Migration warning: ${(e as Error).message}`);
+      }
+
       const stored = await loadRuntime();
       if (stored) {
         runtime = { ...freshRuntime(), ...stored };
@@ -217,6 +231,8 @@ export default defineBackground({
 
     // === RUN: SYNC PHASE ===
     async function runSync(options: SyncOptions): Promise<void> {
+      // Phase 0: only bookmarks source. Phase 1 will parameterize this on the run.
+      const source: SourceKey = "bookmarks";
       if (
         runtime.status === "syncing" ||
         runtime.status === "downloading" ||
@@ -262,7 +278,7 @@ export default defineBackground({
         appendLog(`Endpoint: ${captured.operation} (queryId=${captured.queryId})`);
         await persist();
 
-        const manifest = await loadManifest();
+        const manifest = await loadManifest(source);
         runtime.totalKnown = Object.keys(manifest.bookmarks).length;
         appendLog(`History: ${runtime.totalKnown} bookmarks already tracked.`);
         await persist();
@@ -524,16 +540,23 @@ export default defineBackground({
       appendLog(`Download → ${pendingMedia.length} media items.`);
       await persist();
 
-      const folder = runtime.options?.folder ?? "x-bookmarks";
-      const manifest = await loadManifest();
+      // Phase 0: hard-coded bookmarks. Phase 1 will look up the active source
+      // from runtime.options once user-archive sources exist.
+      const source: SourceKey = "bookmarks";
+      const folder = runtime.options?.folder ?? "xshelf";
+      const manifest = await loadManifest(source);
 
       try {
+        const sourcePath = sourceDiskPath(source);
         while (pendingMedia.length > 0) {
           if (cancelFlag) break;
           const item = pendingMedia[0];
           const ext = item.kind === "video" ? "mp4" : extFromUrl(item.url) ?? "jpg";
           const safeUser = sanitizeUsername(item.username);
-          const filename = `${folder}/media/${safeUser}/${item.tweetId}_${item.mediaIndex}.${ext}`;
+          // <folder>/<sourcePath>/media/<author>/<tweetId>_<n>.<ext>
+          // e.g. xshelf/bookmarks/media/elonmusk/1234_0.jpg
+          //      xshelf/users/naval/media/<id>_<n>.jpg (in phase 1)
+          const filename = `${folder}/${sourcePath}/media/${safeUser}/${item.tweetId}_${item.mediaIndex}.${ext}`;
           try {
             await downloadFile(item.url, filename, "overwrite");
             const t = manifest.bookmarks[item.tweetId];
@@ -594,6 +617,7 @@ export default defineBackground({
      */
     async function writeSnapshot(folder: string, manifest: Manifest): Promise<void> {
       try {
+        const sourcePath = sourceDiskPath(manifest.source);
         const html = snapshotTemplate;
 
         const sortedBookmarks = Object.values(manifest.bookmarks).sort((a, b) => {
@@ -618,7 +642,11 @@ export default defineBackground({
 
         const dataUrl =
           "data:text/html;charset=utf-8," + encodeURIComponent(injected);
-        await downloadFile(dataUrl, `${folder}/explorer.html`, "overwrite");
+        // Per-source self-contained explorer. e.g.:
+        //   xshelf/bookmarks/explorer.html
+        //   xshelf/users/elonmusk/explorer.html (in phase 1)
+        // Phase 2 will add a master xshelf/index.html that aggregates sources.
+        await downloadFile(dataUrl, `${folder}/${sourcePath}/explorer.html`, "overwrite");
       } catch (e) {
         appendLog(`Snapshot write failed: ${(e as Error).message}`);
       }
@@ -731,12 +759,14 @@ export default defineBackground({
               return;
             }
             case "clearManifest": {
-              await clearManifest();
+              // Phase 0: only the bookmarks source. Phase 2 will let the user
+              // choose which source(s) to clear from the popup.
+              await clearManifest("bookmarks");
               sendResponse({ ok: true });
               return;
             }
             case "getManifest": {
-              const m = await loadManifest();
+              const m = await loadManifest("bookmarks");
               sendResponse({ ok: true, manifest: m });
               return;
             }

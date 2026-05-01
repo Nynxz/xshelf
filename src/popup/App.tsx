@@ -7,7 +7,7 @@ export function App() {
   const [captured, setCaptured] = useState<CapturedSummary | null>(null);
   const [version, setVersion] = useState<string | null>(null);
   const [manifest, setManifest] = useState<Manifest | null>(null);
-  const [folder, setFolder] = useState("x-bookmarks");
+  const [folder, setFolder] = useState("xshelf");
   const [maxPages, setMaxPages] = useState(200);
   const [incremental, setIncremental] = useState(true);
 
@@ -123,7 +123,7 @@ export function App() {
         with your manifest. Click <em>Download</em> to fetch new media or <em>Discard</em> to skip.
         The run lives in the service worker — close and reopen this popup any time.
         <br /><br />
-        After each sync, a self-contained <code>{(folder || "x-bookmarks") + "/explorer.html"}</code> is written
+        After each sync, a self-contained <code>{(folder || "xshelf") + "/bookmarks/explorer.html"}</code> is written
         to your Downloads folder. Open that file from your file manager for full media browsing.
         The "Open explorer" button below opens the live in-browser version (faster, but local
         videos won't play there).
