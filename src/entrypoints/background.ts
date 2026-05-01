@@ -1,0 +1,724 @@
+import { defineBackground } from "wxt/sandbox";
+import { SW_VERSION } from "../lib/messaging";
+import type {
+  Bookmark,
+  Captured,
+  Manifest,
+  PendingMediaItem,
+  PendingSummary,
+  RuntimeState,
+  SyncOptions,
+} from "../lib/types";
+import {
+  clearManifest,
+  clearPending,
+  freshRuntime,
+  loadCaptured,
+  loadManifest,
+  loadPending,
+  loadRuntime,
+  saveCaptured,
+  saveManifest,
+  savePending,
+  saveRuntime,
+  wipeAll,
+} from "../lib/storage";
+import {
+  allMediaDownloaded,
+  extFromUrl,
+  extractEntries,
+  fetchBookmarksPage,
+  parseTweetEntry,
+  sanitizeUsername,
+} from "../lib/bookmarks";
+import {
+  cancelAllDownloads,
+  downloadFile,
+  existsByUrl,
+  mapLimited,
+} from "../lib/downloads";
+
+export default defineBackground({
+  type: "module",
+  main() {
+    // === STATE ===
+    let runtime: RuntimeState = freshRuntime();
+    let pendingMedia: PendingMediaItem[] = [];
+    let captured: Captured = { auth: null, queryId: null, operation: null };
+    let cancelFlag = false;
+
+    // === PERSISTENCE (throttled) ===
+    let persistTimer: ReturnType<typeof setTimeout> | null = null;
+    let persistQueued = false;
+
+    async function persist(): Promise<void> {
+      persistQueued = true;
+      if (persistTimer) return;
+      persistTimer = setTimeout(flushPersist, 200);
+    }
+
+    async function flushPersist(): Promise<void> {
+      persistTimer = null;
+      if (!persistQueued) return;
+      persistQueued = false;
+      const snap = runtime;
+      try {
+        await saveRuntime(snap);
+        chrome.runtime
+          .sendMessage({ type: "stateUpdate", state: snap })
+          .catch(() => {});
+      } catch {}
+    }
+
+    async function persistNow(): Promise<void> {
+      persistQueued = false;
+      if (persistTimer) {
+        clearTimeout(persistTimer);
+        persistTimer = null;
+      }
+      await saveRuntime(runtime);
+      chrome.runtime
+        .sendMessage({ type: "stateUpdate", state: runtime })
+        .catch(() => {});
+    }
+
+    function appendLog(line: string): void {
+      const ts = new Date().toLocaleTimeString();
+      runtime.log.push(`[${ts}] ${line}`);
+      while (runtime.log.length > 120) runtime.log.shift();
+    }
+
+    function recomputeSummary(): void {
+      const byUser: PendingSummary["byUser"] = {};
+      let photos = 0;
+      let videos = 0;
+      const tweetIds = new Set<string>();
+      for (const p of pendingMedia) {
+        tweetIds.add(p.tweetId);
+        const u = p.username || "unknown";
+        if (!byUser[u]) byUser[u] = { count: 0, photos: 0, videos: 0 };
+        byUser[u].count++;
+        if (p.kind === "video") {
+          byUser[u].videos++;
+          videos++;
+        } else {
+          byUser[u].photos++;
+          photos++;
+        }
+      }
+      runtime.pendingSummary = {
+        count: pendingMedia.length,
+        tweetCount: tweetIds.size,
+        photoCount: photos,
+        videoCount: videos,
+        byUser,
+      };
+    }
+
+    // === STARTUP ===
+    async function loadPersisted(): Promise<void> {
+      const stored = await loadRuntime();
+      if (stored) {
+        runtime = { ...freshRuntime(), ...stored };
+      }
+      pendingMedia = await loadPending();
+      recomputeSummary();
+      captured = await loadCaptured();
+      // Discard a previously-captured folder-management operation; only the timeline op is useful.
+      if (
+        captured.operation &&
+        (/BookmarkFolders/i.test(captured.operation) || /UpdateBookmark/i.test(captured.operation))
+      ) {
+        captured.operation = null;
+        captured.queryId = null;
+        await saveCaptured(captured);
+      }
+
+      if (runtime.status === "syncing" || runtime.status === "cancelling") {
+        runtime.status = "interrupted";
+        runtime.errorMessage =
+          "Service worker was restarted mid-sync. Click Start sync to resume.";
+        appendLog(runtime.errorMessage);
+        await persistNow();
+      } else if (runtime.status === "downloading") {
+        if (pendingMedia.length > 0) {
+          runtime.status = "ready";
+          runtime.errorMessage = null;
+          appendLog(
+            `Service worker restarted mid-download. ${pendingMedia.length} items still pending — click Download to resume.`,
+          );
+        } else {
+          runtime.status = "done";
+        }
+        await persistNow();
+      }
+    }
+
+    // === CAPTURE (auth + endpoint via webRequest) ===
+    chrome.webRequest.onSendHeaders.addListener(
+      (details) => {
+        let touched = false;
+        const auth = { ...(captured.auth ?? {}) } as { authorization?: string; csrf?: string };
+        for (const h of details.requestHeaders ?? []) {
+          const name = h.name.toLowerCase();
+          if (name === "authorization") {
+            auth.authorization = h.value;
+            touched = true;
+          } else if (name === "x-csrf-token") {
+            auth.csrf = h.value;
+            touched = true;
+          }
+        }
+        if (touched && auth.authorization && auth.csrf) {
+          captured.auth = { authorization: auth.authorization, csrf: auth.csrf };
+        }
+        const m = details.url.match(
+          /\/i\/api\/graphql\/([^/?]+)\/([^/?]*Bookmark[^/?]*)/i,
+        );
+        if (m) {
+          const op = m[2];
+          const isFolderOnly =
+            /BookmarkFolders/i.test(op) ||
+            /CreateBookmarkFolder/i.test(op) ||
+            /DeleteBookmarkFolder/i.test(op) ||
+            /UpdateBookmark/i.test(op);
+          const isCanonical = /^Bookmarks$/.test(op);
+          if (!isFolderOnly) {
+            if (
+              isCanonical ||
+              !captured.operation ||
+              /BookmarkFolders/i.test(captured.operation)
+            ) {
+              captured.queryId = m[1];
+              captured.operation = op;
+              touched = true;
+            }
+          }
+        }
+        if (touched) saveCaptured(captured);
+      },
+      {
+        urls: [
+          "https://x.com/i/api/*",
+          "https://twitter.com/i/api/*",
+          "https://api.x.com/*",
+          "https://api.twitter.com/*",
+        ],
+      },
+      ["requestHeaders", "extraHeaders"],
+    );
+
+    // === RUN: SYNC PHASE ===
+    async function runSync(options: SyncOptions): Promise<void> {
+      if (
+        runtime.status === "syncing" ||
+        runtime.status === "downloading" ||
+        runtime.status === "cancelling"
+      )
+        return;
+      cancelFlag = false;
+      // Single timestamp for THIS sync — every visited bookmark gets the same lastSeenAt
+      // so the (lastSeenAt DESC, lastSeenIndex ASC) sort is determined purely by index.
+      const syncStartedIso = new Date().toISOString();
+      runtime = {
+        ...freshRuntime(),
+        status: "syncing",
+        startedAt: syncStartedIso,
+        options,
+      };
+      pendingMedia = [];
+      await clearPending();
+      appendLog(
+        `Sync → ${options.folder}/  (maxPages=${options.maxPages}, incremental=${options.incremental})`,
+      );
+      await persist();
+
+      try {
+        if (!captured.auth?.authorization || !captured.auth?.csrf) {
+          throw new Error(
+            "No auth captured yet. Open https://x.com/i/bookmarks (or refresh it) so the extension can observe the request.",
+          );
+        }
+        if (!captured.queryId || !captured.operation) {
+          throw new Error(
+            "No bookmark endpoint captured yet. Open https://x.com/i/bookmarks and scroll once.",
+          );
+        }
+        if (
+          /BookmarkFolders/i.test(captured.operation) ||
+          /UpdateBookmark/i.test(captured.operation)
+        ) {
+          throw new Error(
+            `Captured the wrong endpoint (${captured.operation}). Open https://x.com/i/bookmarks (the main list, not a folder) and scroll once.`,
+          );
+        }
+        appendLog(`Endpoint: ${captured.operation} (queryId=${captured.queryId})`);
+        await persist();
+
+        const manifest = await loadManifest();
+        runtime.totalKnown = Object.keys(manifest.bookmarks).length;
+        appendLog(`History: ${runtime.totalKnown} bookmarks already tracked.`);
+        await persist();
+
+        // ---- One-time backfill of lastSeenIndex (insertion order = original encounter order)
+        {
+          const ids = Object.keys(manifest.bookmarks);
+          const needsBackfill = ids.some(
+            (id) => manifest.bookmarks[id].lastSeenIndex == null,
+          );
+          if (needsBackfill) {
+            appendLog("Backfilling sort ordering for legacy entries…");
+            let backfilled = 0;
+            ids.forEach((id, idx) => {
+              const b = manifest.bookmarks[id];
+              if (b.lastSeenIndex == null) {
+                b.lastSeenIndex = idx + 1;
+                if (!b.lastSeenAt) {
+                  b.lastSeenAt = b.firstSeenAt || "1970-01-01T00:00:00.000Z";
+                }
+                backfilled++;
+              }
+            });
+            if (backfilled) appendLog(`Backfilled ${backfilled} entries.`);
+            await saveManifest(manifest);
+          }
+        }
+
+        // ---- Audit pass against Chrome download history
+        if (options.incremental && runtime.totalKnown > 0) {
+          runtime.currentPhase = "audit";
+          await persist();
+          const reconciled = await auditAgainstChromeDownloads(manifest);
+          if (reconciled > 0) {
+            appendLog(
+              `Audit reconciled ${reconciled} files (already on disk; won't re-download).`,
+            );
+            await saveManifest(manifest);
+          } else {
+            appendLog("Audit: nothing new to reconcile.");
+          }
+          await persist();
+        }
+
+        // ---- Pagination
+        runtime.currentPhase = "fetch";
+        await persist();
+        let cursor: string | null = null;
+        const queuedKey = new Set<string>();
+        let consecutiveKnown = 0;
+        let stoppedEarly = false;
+        const earlyStopAfter = options.earlyStopAfter ?? 30;
+        let syncEncounterIndex = 0;
+
+        while (runtime.pageCount < options.maxPages) {
+          if (cancelFlag) break;
+          runtime.pageCount++;
+          appendLog(`Page ${runtime.pageCount}…`);
+          await persist();
+
+          let json: unknown;
+          try {
+            json = await fetchBookmarksPage({
+              host: "x.com",
+              queryId: captured.queryId,
+              operation: captured.operation,
+              cursor,
+              captured,
+            });
+          } catch (e) {
+            const msg = (e as Error).message ?? String(e);
+            if (/HTTP 404/.test(msg) && /Query not found/i.test(msg)) {
+              appendLog(
+                "404 — endpoint rotated. Refresh https://x.com/i/bookmarks then click Start sync again.",
+              );
+            }
+            throw e;
+          }
+          const { entries, nextCursor } = extractEntries(json);
+          let newOnPage = 0;
+
+          for (const entry of entries) {
+            const tweet = parseTweetEntry(entry);
+            if (!tweet) continue;
+            runtime.totalSeen++;
+            const existing = manifest.bookmarks[tweet.id] as Bookmark | undefined;
+            const nowIso = syncStartedIso;
+
+            if (existing && options.incremental && allMediaDownloaded(existing)) {
+              syncEncounterIndex++;
+              existing.lastSeenAt = nowIso;
+              existing.lastSeenIndex = syncEncounterIndex;
+              existing.replyCount = tweet.replyCount;
+              existing.retweetCount = tweet.retweetCount;
+              existing.favoriteCount = tweet.favoriteCount;
+              existing.quoteCount = tweet.quoteCount;
+              consecutiveKnown++;
+              if (consecutiveKnown >= earlyStopAfter) {
+                stoppedEarly = true;
+                appendLog(
+                  `${consecutiveKnown} consecutive known tweets — stopping early.`,
+                );
+                break;
+              }
+            } else {
+              consecutiveKnown = 0;
+              const mergedMedia = tweet.media.map((m, i) => {
+                const prior = existing?.media?.[i];
+                return {
+                  kind: m.kind,
+                  index: m.index,
+                  url: m.url,
+                  downloaded: !!prior?.downloaded,
+                };
+              });
+              syncEncounterIndex++;
+              const merged: Bookmark = {
+                ...tweet,
+                media: mergedMedia,
+                firstSeenAt: existing ? existing.firstSeenAt : nowIso,
+                lastSeenAt: nowIso,
+                lastSeenIndex: syncEncounterIndex,
+              };
+              manifest.bookmarks[tweet.id] = merged;
+              if (!existing) {
+                runtime.newCount++;
+                newOnPage++;
+              }
+              for (const m of mergedMedia) {
+                if (m.downloaded) continue;
+                const key = `${merged.id}_${m.index}`;
+                if (queuedKey.has(key)) continue;
+                queuedKey.add(key);
+                pendingMedia.push({
+                  tweetId: merged.id,
+                  username: merged.username,
+                  mediaIndex: m.index,
+                  kind: m.kind,
+                  url: m.url,
+                });
+              }
+            }
+          }
+
+          runtime.totalKnown = Object.keys(manifest.bookmarks).length;
+          appendLog(
+            `Page ${runtime.pageCount}: seen=${runtime.totalSeen}, new=${runtime.newCount}, +${newOnPage} this page, pending=${pendingMedia.length}.`,
+          );
+          recomputeSummary();
+          await persist();
+          await saveManifest(manifest);
+
+          if (stoppedEarly) break;
+          if (!nextCursor || nextCursor === cursor || entries.length === 0) break;
+          cursor = nextCursor;
+          await sleep(800 + Math.random() * 600);
+        }
+
+        // ---- Pre-flight: drop pending entries already in Chrome's download history
+        if (options.incremental && pendingMedia.length) {
+          runtime.currentPhase = "preflight";
+          appendLog(
+            `Pre-flight: checking ${pendingMedia.length} URLs against download history…`,
+          );
+          await persist();
+          const results = await mapLimited(
+            pendingMedia,
+            4,
+            (p) => (cancelFlag ? Promise.resolve(false) : existsByUrl(p.url)),
+            (done, total) => {
+              appendLog(`Pre-flight progress: ${done}/${total}`);
+              persist();
+            },
+          );
+          let skipped = 0;
+          const keptSkipFlags = new Array(pendingMedia.length).fill(false);
+          for (let i = 0; i < pendingMedia.length; i++) {
+            if (results[i]) {
+              const item = pendingMedia[i];
+              const t = manifest.bookmarks[item.tweetId];
+              const m = t?.media?.find((mm) => mm.index === item.mediaIndex);
+              if (m) m.downloaded = true;
+              keptSkipFlags[i] = true;
+              skipped++;
+            }
+          }
+          pendingMedia = pendingMedia.filter((_, i) => !keptSkipFlags[i]);
+          runtime.mediaSkipped = skipped;
+          if (skipped > 0) {
+            appendLog(`Pre-flight skipped ${skipped} URLs already on disk.`);
+            await saveManifest(manifest);
+          }
+          recomputeSummary();
+          await persist();
+        }
+
+        recomputeSummary();
+        await savePending(pendingMedia);
+
+        manifest.lastRun = {
+          finishedAt: new Date().toISOString(),
+          pages: runtime.pageCount,
+          seen: runtime.totalSeen,
+          newCount: runtime.newCount,
+          stoppedEarly,
+          phase: "sync",
+        };
+        await saveManifest(manifest);
+
+        runtime.totalKnown = Object.keys(manifest.bookmarks).length;
+        runtime.finishedAt = new Date().toISOString();
+        runtime.currentPhase = null;
+
+        if (cancelFlag) {
+          runtime.status = "cancelled";
+          appendLog(`Cancelled during sync. ${pendingMedia.length} items in pending list.`);
+        } else if (pendingMedia.length === 0) {
+          runtime.status = "done";
+          appendLog(
+            `Sync done. Nothing new to download. seen=${runtime.totalSeen}, total=${runtime.totalKnown}.`,
+          );
+        } else {
+          runtime.status = "ready";
+          appendLog(
+            `Sync done. ${pendingMedia.length} media items pending. Click Download to fetch, or Discard.`,
+          );
+        }
+        await persistNow();
+      } catch (e) {
+        runtime.status = "error";
+        runtime.errorMessage = (e as Error).message ?? String(e);
+        runtime.finishedAt = new Date().toISOString();
+        runtime.currentPhase = null;
+        appendLog(`Error: ${runtime.errorMessage}`);
+        await persistNow();
+      }
+    }
+
+    // === RUN: DOWNLOAD PHASE ===
+    async function runDownload(): Promise<void> {
+      if (runtime.status !== "ready") return;
+      if (pendingMedia.length === 0) {
+        runtime.status = "done";
+        await persistNow();
+        return;
+      }
+      cancelFlag = false;
+      runtime.status = "downloading";
+      runtime.currentPhase = "download";
+      runtime.mediaTotal = pendingMedia.length;
+      runtime.mediaDone = 0;
+      runtime.mediaErrored = 0;
+      runtime.startedAt = new Date().toISOString();
+      appendLog(`Download → ${pendingMedia.length} media items.`);
+      await persist();
+
+      const folder = runtime.options?.folder ?? "x-bookmarks";
+      const manifest = await loadManifest();
+
+      try {
+        while (pendingMedia.length > 0) {
+          if (cancelFlag) break;
+          const item = pendingMedia[0];
+          const ext = item.kind === "video" ? "mp4" : extFromUrl(item.url) ?? "jpg";
+          const safeUser = sanitizeUsername(item.username);
+          const filename = `${folder}/media/${safeUser}/${item.tweetId}_${item.mediaIndex}.${ext}`;
+          try {
+            await downloadFile(item.url, filename, "overwrite");
+            const t = manifest.bookmarks[item.tweetId];
+            const m = t?.media?.find((mm) => mm.index === item.mediaIndex);
+            if (m) m.downloaded = true;
+          } catch (e) {
+            runtime.mediaErrored++;
+            appendLog(
+              `Failed: ${item.tweetId}_${item.mediaIndex} — ${(e as Error).message}`,
+            );
+          }
+          pendingMedia.shift();
+          runtime.mediaDone++;
+          if (runtime.mediaDone % 5 === 0) {
+            recomputeSummary();
+            persist();
+          }
+          if (runtime.mediaDone % 25 === 0 || pendingMedia.length === 0) {
+            await savePending(pendingMedia);
+            await saveManifest(manifest);
+          }
+        }
+        recomputeSummary();
+        await savePending(pendingMedia);
+        await saveManifest(manifest);
+
+        runtime.totalKnown = Object.keys(manifest.bookmarks).length;
+        runtime.finishedAt = new Date().toISOString();
+        runtime.currentPhase = null;
+        if (cancelFlag) {
+          runtime.status = pendingMedia.length ? "ready" : "cancelled";
+          appendLog(`Cancelled during download. ${pendingMedia.length} still pending.`);
+        } else {
+          runtime.status = "done";
+          appendLog(
+            `Download done. ${runtime.mediaDone} processed, ${runtime.mediaErrored} errored, total=${runtime.totalKnown}.`,
+          );
+        }
+        await persistNow();
+      } catch (e) {
+        runtime.status = "error";
+        runtime.errorMessage = (e as Error).message ?? String(e);
+        runtime.finishedAt = new Date().toISOString();
+        runtime.currentPhase = null;
+        appendLog(`Error: ${runtime.errorMessage}`);
+        await persistNow();
+      }
+    }
+
+    async function auditAgainstChromeDownloads(manifest: Manifest): Promise<number> {
+      const pending: Array<{ tweetId: string; mediaIndex: number; url: string }> = [];
+      for (const id of Object.keys(manifest.bookmarks)) {
+        const t = manifest.bookmarks[id];
+        for (const m of t.media ?? []) {
+          if (!m.downloaded && m.url) {
+            pending.push({ tweetId: id, mediaIndex: m.index, url: m.url });
+          }
+        }
+      }
+      if (!pending.length) return 0;
+      appendLog(`Auditing ${pending.length} URLs…`);
+      await persist();
+      let reconciled = 0;
+      const results = await mapLimited(
+        pending,
+        4,
+        (p) => (cancelFlag ? Promise.resolve(false) : existsByUrl(p.url)),
+        (done, total) => {
+          appendLog(`Audit progress: ${done}/${total}`);
+          persist();
+        },
+      );
+      for (let i = 0; i < pending.length; i++) {
+        if (results[i]) {
+          const t = manifest.bookmarks[pending[i].tweetId];
+          const m = t?.media?.find((mm) => mm.index === pending[i].mediaIndex);
+          if (m) {
+            m.downloaded = true;
+            reconciled++;
+          }
+        }
+      }
+      return reconciled;
+    }
+
+    // === MESSAGE API ===
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      (async () => {
+        try {
+          switch (msg.type) {
+            case "getRunState": {
+              sendResponse({
+                ok: true,
+                version: SW_VERSION,
+                state: runtime,
+                captured: {
+                  hasAuth: !!(
+                    captured.auth?.authorization && captured.auth?.csrf
+                  ),
+                  queryId: captured.queryId,
+                  operation: captured.operation,
+                },
+              });
+              return;
+            }
+            case "startSync": {
+              if (
+                runtime.status === "syncing" ||
+                runtime.status === "downloading" ||
+                runtime.status === "cancelling"
+              ) {
+                sendResponse({ ok: false, error: "Already running" });
+                return;
+              }
+              runSync(msg.options);
+              sendResponse({ ok: true });
+              return;
+            }
+            case "startDownload": {
+              if (runtime.status !== "ready") {
+                sendResponse({
+                  ok: false,
+                  error: `Cannot start download from status "${runtime.status}".`,
+                });
+                return;
+              }
+              runDownload();
+              sendResponse({ ok: true });
+              return;
+            }
+            case "discardPending": {
+              await clearPending();
+              pendingMedia = [];
+              recomputeSummary();
+              runtime.status = "idle";
+              appendLog("Pending list discarded.");
+              await persistNow();
+              sendResponse({ ok: true });
+              return;
+            }
+            case "cancelBackup": {
+              if (
+                runtime.status === "syncing" ||
+                runtime.status === "downloading" ||
+                runtime.status === "cancelling"
+              ) {
+                cancelFlag = true;
+                runtime.status = "cancelling";
+                appendLog("Cancel requested.");
+                await persistNow();
+                await cancelAllDownloads();
+              }
+              sendResponse({ ok: true });
+              return;
+            }
+            case "clearManifest": {
+              await clearManifest();
+              sendResponse({ ok: true });
+              return;
+            }
+            case "getManifest": {
+              const m = await loadManifest();
+              sendResponse({ ok: true, manifest: m });
+              return;
+            }
+            case "wipeAll": {
+              await wipeAll();
+              runtime = freshRuntime();
+              pendingMedia = [];
+              captured = { auth: null, queryId: null, operation: null };
+              appendLog("All extension data wiped.");
+              await persistNow();
+              sendResponse({ ok: true });
+              return;
+            }
+            case "openExplorer": {
+              await chrome.tabs.create({ url: chrome.runtime.getURL("explorer.html") });
+              sendResponse({ ok: true });
+              return;
+            }
+            default:
+              sendResponse({ ok: false, error: "unknown message" });
+          }
+        } catch (e) {
+          sendResponse({ ok: false, error: (e as Error).message ?? String(e) });
+        }
+      })();
+      return true;
+    });
+
+    // === BOOTSTRAP ===
+    loadPersisted();
+    chrome.runtime.onStartup.addListener(loadPersisted);
+    chrome.runtime.onInstalled.addListener(loadPersisted);
+  },
+});
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
