@@ -87,14 +87,83 @@ input:focus, select:focus { border-color: var(--accent); }
   border: none;
   background: var(--card);
   color: var(--muted);
-  padding: 0 12px;
+  padding: 0 10px;
   cursor: pointer;
   border-radius: 0;
   font-size: 12px;
   height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
 .view-btn.active { background: var(--accent); color: #fff; }
 .view-btn:not(.active):hover { background: var(--card-hover); }
+.view-btn svg { display: block; }
+
+/* Single icon button (settings, etc.) */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  width: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted);
+  cursor: pointer;
+}
+.icon-btn:hover { background: var(--card-hover); color: var(--fg); }
+.icon-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* Settings dropdown */
+.settings-wrap { position: relative; display: inline-block; }
+.settings-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 220px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.settings-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  height: 26px;
+}
+.seg-btn {
+  border: none;
+  background: var(--bg);
+  color: var(--muted);
+  padding: 0 10px;
+  font-size: 11px;
+  height: 24px;
+  cursor: pointer;
+  border-radius: 0;
+}
+.seg-btn.active { background: var(--accent); color: #fff; }
+.seg-btn:not(.active):hover { background: var(--card-hover); }
 
 main {
   max-width: 700px;
@@ -153,18 +222,45 @@ main {
   display: flex;
   gap: 14px;
 }
+.stats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.stats svg { flex-shrink: 0; }
+/* List-view media row: all items share the same height; widths follow each
+ * image's natural aspect ratio. Wraps to a new row when the total width
+ * exceeds the card. No horizontal scrolling — all media is visible at once. */
 .media {
   margin-top: 10px;
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
-.media a, .media .video-wrap { display: block; }
+.media a,
+.media .video-wrap,
+.media .media-btn {
+  display: block;
+  flex-shrink: 0;
+  height: var(--media-row-height, 220px);
+  padding: 0;
+}
+.media .media-btn {
+  border: none;
+  background: none;
+  cursor: zoom-in;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.media .media-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .media img, .media video {
-  width: 100%;
-  height: auto;
-  max-height: 600px;
-  object-fit: cover;
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  object-fit: var(--media-fit, contain);
   border-radius: 12px;
   display: block;
   background: var(--border);
@@ -203,7 +299,7 @@ button.load-more:hover { filter: brightness(1.08); }
 main.view-grid {
   max-width: 1280px;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--grid-min, 180px), 1fr));
   gap: 4px;
   padding: 12px;
 }
@@ -222,7 +318,8 @@ main.view-grid .load-more { grid-column: 1 / -1; }
 .tile video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: var(--media-fit, contain);
+  background: var(--border);
   display: block;
   transition: transform 0.18s ease;
 }
@@ -242,16 +339,18 @@ main.view-grid .load-more { grid-column: 1 / -1; }
   transition: opacity 0.15s ease;
 }
 .tile:hover .overlay { opacity: 1; }
-.tile.video::after {
-  content: "▶";
+.tile .play-badge {
   position: absolute;
   top: 6px;
   right: 6px;
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: #fff;
   background: rgba(0, 0, 0, 0.6);
-  padding: 2px 6px;
+  padding: 3px 5px;
   border-radius: 6px;
+  pointer-events: none;
 }
 .tile.missing {
   display: flex;
@@ -348,5 +447,16 @@ main.view-grid .load-more { grid-column: 1 / -1; }
   color: rgba(255,255,255,0.55);
   display: flex;
   gap: 14px;
+}
+#lbStats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+#lbStats svg { flex-shrink: 0; }
+#lbDate {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 a { color: var(--accent); }

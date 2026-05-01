@@ -1,3 +1,6 @@
+import { useEffect, useRef, useState } from "preact/hooks";
+import { IconList, IconGrid, IconSettings } from "./icons";
+
 export type ViewMode = "list" | "grid";
 export type SortKey =
   | "bookmarked-desc"
@@ -7,6 +10,8 @@ export type SortKey =
   | "user"
   | "likes";
 export type MediaFilter = "" | "any" | "photo" | "video" | "none";
+export type ImageFit = "contain" | "cover";
+export type DisplaySize = "small" | "medium" | "large";
 
 interface HeaderProps {
   count: number;
@@ -22,8 +27,11 @@ interface HeaderProps {
   setUserFilter: (s: string) => void;
   mediaFilter: MediaFilter;
   setMediaFilter: (m: MediaFilter) => void;
+  imageFit: ImageFit;
+  setImageFit: (f: ImageFit) => void;
+  size: DisplaySize;
+  setSize: (s: DisplaySize) => void;
   lastRunFinishedAt: string | null;
-  viewMode: ViewMode;
 }
 
 export function Header(props: HeaderProps) {
@@ -79,22 +87,99 @@ export function Header(props: HeaderProps) {
             <option value="user">By user</option>
             <option value="likes">Most liked</option>
           </select>
+          <SettingsButton {...props} />
           <div class="view-toggle" role="tablist" aria-label="View mode">
             <button
               class={`view-btn ${props.view === "list" ? "active" : ""}`}
               onClick={() => props.setView("list")}
+              title="List view"
+              aria-label="List view"
             >
-              List
+              <IconList />
             </button>
             <button
               class={`view-btn ${props.view === "grid" ? "active" : ""}`}
               onClick={() => props.setView("grid")}
+              title="Grid view"
+              aria-label="Grid view"
             >
-              Grid
+              <IconGrid />
             </button>
           </div>
         </div>
       </div>
     </header>
+  );
+}
+
+function SettingsButton(props: HeaderProps) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div class="settings-wrap" ref={wrapRef}>
+      <button
+        class={`icon-btn ${open ? "active" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        title="Display options"
+        aria-label="Display options"
+        aria-expanded={open}
+      >
+        <IconSettings />
+      </button>
+      {open && (
+        <div class="settings-panel" role="dialog" aria-label="Display options">
+          <div class="settings-row">
+            <span class="settings-label">Size</span>
+            <div class="seg">
+              {(["small", "medium", "large"] as DisplaySize[]).map((s) => (
+                <button
+                  key={s}
+                  class={`seg-btn ${props.size === s ? "active" : ""}`}
+                  onClick={() => props.setSize(s)}
+                >
+                  {s[0].toUpperCase() + s.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div class="settings-row">
+            <span class="settings-label">Image fit</span>
+            <div class="seg">
+              <button
+                class={`seg-btn ${props.imageFit === "contain" ? "active" : ""}`}
+                onClick={() => props.setImageFit("contain")}
+                title="Show the whole image; may letterbox"
+              >
+                Contain
+              </button>
+              <button
+                class={`seg-btn ${props.imageFit === "cover" ? "active" : ""}`}
+                onClick={() => props.setImageFit("cover")}
+                title="Crop to fill"
+              >
+                Cover
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
