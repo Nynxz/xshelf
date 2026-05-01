@@ -11,7 +11,13 @@ export default defineConfig({
     description:
       "Backs up your X/Twitter bookmarks (text, full-res images, videos, metadata). Read-only — never modifies your bookmarks.",
     version: "0.2.0",
-    permissions: ["downloads", "storage", "unlimitedStorage", "webRequest"],
+    permissions: [
+      "downloads",
+      "downloads.open",
+      "storage",
+      "unlimitedStorage",
+      "webRequest",
+    ],
     host_permissions: [
       "https://x.com/*",
       "https://twitter.com/*",
@@ -19,12 +25,6 @@ export default defineConfig({
       "https://api.twitter.com/*",
       "https://pbs.twimg.com/*",
       "https://video.twimg.com/*",
-    ],
-    web_accessible_resources: [
-      {
-        resources: ["explorer.html"],
-        matches: ["<all_urls>"],
-      },
     ],
   },
 });

@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Bookmark, Media } from "../lib/types";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
+import { IconPlay } from "./icons";
 
 export interface MediaPair {
   b: Bookmark;
@@ -10,7 +11,6 @@ export interface MediaPair {
 export function GridTile({ pair, onClick }: { pair: MediaPair; onClick: () => void }) {
   const { b, m } = pair;
   const [missing, setMissing] = useState(false);
-  const [fallback, setFallback] = useState(false);
 
   const safeUser = sanitizeUsername(b.username);
   const ext = m.kind === "video" ? "mp4" : (extFromUrl(m.url) ?? "jpg");
@@ -29,15 +29,10 @@ export function GridTile({ pair, onClick }: { pair: MediaPair; onClick: () => vo
       {m.kind === "video" ? (
         <video src={localPath} preload="metadata" muted playsInline onError={() => setMissing(true)} />
       ) : (
-        <img
-          src={fallback ? m.url : localPath}
-          loading="lazy"
-          alt=""
-          onError={() => {
-            if (fallback) setMissing(true);
-            else setFallback(true);
-          }}
-        />
+        <img src={localPath} loading="lazy" alt="" onError={() => setMissing(true)} />
+      )}
+      {m.kind === "video" && (
+        <span class="play-badge"><IconPlay size={11} /></span>
       )}
       <div class="overlay">@{b.username}</div>
     </div>

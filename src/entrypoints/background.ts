@@ -1,5 +1,12 @@
 import { defineBackground } from "wxt/sandbox";
 import { SW_VERSION } from "../lib/messaging";
+// The on-disk explorer snapshot template: a self-contained HTML built by
+// `npm run build:snapshot` (vite + vite-plugin-singlefile). Vite's `?raw`
+// suffix imports the file's contents as a string at build time, so the
+// finished SW bundle has the full template baked in. We avoid using public/
+// because WXT was reprocessing public/*.html as additional entries, which
+// undid the singlefile inlining.
+import snapshotTemplate from "../snapshot/dist/index.html?raw";
 import type {
   Bookmark,
   Captured,
@@ -465,6 +472,11 @@ export default defineBackground({
         };
         await saveManifest(manifest);
 
+        // Write the on-disk snapshot so the user has an offline-viewable HTML
+        // alongside their media files. Done after sync (even before the user
+        // accepts the download phase) so the index reflects current manifest state.
+        await writeSnapshot(options.folder, manifest);
+
         runtime.totalKnown = Object.keys(manifest.bookmarks).length;
         runtime.finishedAt = new Date().toISOString();
         runtime.currentPhase = null;
@@ -547,6 +559,8 @@ export default defineBackground({
         recomputeSummary();
         await savePending(pendingMedia);
         await saveManifest(manifest);
+        // Re-write the snapshot now that media `downloaded` flags are flipped.
+        await writeSnapshot(folder, manifest);
 
         runtime.totalKnown = Object.keys(manifest.bookmarks).length;
         runtime.finishedAt = new Date().toISOString();
@@ -568,6 +582,45 @@ export default defineBackground({
         runtime.currentPhase = null;
         appendLog(`Error: ${runtime.errorMessage}`);
         await persistNow();
+      }
+    }
+
+    /**
+     * Fetches the extension's built `explorer.html` (which is self-contained thanks
+     * to vite-plugin-singlefile), injects the user's bookmarks as inline JSON,
+     * and writes the result to ~/Downloads/<folder>/explorer.html. The snapshot
+     * sits next to the media folder, so relative `media/<user>/<id>.jpg` paths
+     * resolve from `file://` and the user gets full media playback offline.
+     */
+    async function writeSnapshot(folder: string, manifest: Manifest): Promise<void> {
+      try {
+        const html = snapshotTemplate;
+
+        const sortedBookmarks = Object.values(manifest.bookmarks).sort((a, b) => {
+          const ta = a.lastSeenAt ? Date.parse(a.lastSeenAt) || 0 : 0;
+          const tb = b.lastSeenAt ? Date.parse(b.lastSeenAt) || 0 : 0;
+          if (tb !== ta) return tb - ta;
+          return (a.lastSeenIndex ?? 1e9) - (b.lastSeenIndex ?? 1e9);
+        });
+
+        const payload = JSON.stringify({
+          exportedAt: new Date().toISOString(),
+          count: sortedBookmarks.length,
+          lastRun: manifest.lastRun,
+          bookmarks: sortedBookmarks,
+        }).replace(/<\/script/gi, "<\\/script");
+        const dataTag = `<script id="xbd-data" type="application/json">${payload}</script>`;
+
+        // Insert just before </body> so it's parsed before the main bundle runs.
+        const injected = html.includes("</body>")
+          ? html.replace("</body>", `${dataTag}</body>`)
+          : html + dataTag;
+
+        const dataUrl =
+          "data:text/html;charset=utf-8," + encodeURIComponent(injected);
+        await downloadFile(dataUrl, `${folder}/explorer.html`, "overwrite");
+      } catch (e) {
+        appendLog(`Snapshot write failed: ${(e as Error).message}`);
       }
     }
 
@@ -697,11 +750,8 @@ export default defineBackground({
               sendResponse({ ok: true });
               return;
             }
-            case "openExplorer": {
-              await chrome.tabs.create({ url: chrome.runtime.getURL("explorer.html") });
-              sendResponse({ ok: true });
-              return;
-            }
+            // (openExplorer is handled by the popup directly via chrome.downloads.open;
+            // it needs the click's user gesture, which doesn't survive an SW round-trip.)
             default:
               sendResponse({ ok: false, error: "unknown message" });
           }

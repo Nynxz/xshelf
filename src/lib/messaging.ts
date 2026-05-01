@@ -12,8 +12,7 @@ export type RequestMessage =
   | { type: "discardPending" }
   | { type: "cancelBackup" }
   | { type: "clearManifest" }
-  | { type: "wipeAll" }
-  | { type: "openExplorer" };
+  | { type: "wipeAll" };
 
 export type ResponseFor<T extends RequestMessage["type"]> =
   T extends "getRunState"
@@ -26,7 +25,7 @@ export type ResponseFor<T extends RequestMessage["type"]> =
 export type BroadcastMessage =
   | { type: "stateUpdate"; state: RuntimeState };
 
-export const SW_VERSION = "v9-wxt";
+export const SW_VERSION = "v13-icons";
 
 export function send<T extends RequestMessage>(
   msg: T,

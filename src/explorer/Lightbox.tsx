@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
 import { fmtDate, fmtNum, linkify } from "./util";
 import type { MediaPair } from "./GridTile";
+import { IconClose, IconChevronLeft, IconChevronRight, IconInfo, IconExternal, IconReply, IconRetweet, IconHeart, IconQuote } from "./icons";
 
 interface LightboxProps {
   mediaList: MediaPair[];
@@ -39,22 +40,22 @@ export function Lightbox({ mediaList, index, onClose, onNavigate }: LightboxProp
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <button id="lbClose" aria-label="close" onClick={onClose}>×</button>
-      <button id="lbToggleInfo" title="Show/hide tweet text (i)" onClick={(e) => {
+      <button id="lbClose" aria-label="Close" onClick={onClose}><IconClose size={20} /></button>
+      <button id="lbToggleInfo" title="Toggle tweet text (i)" aria-label="Toggle tweet text" onClick={(e) => {
         e.stopPropagation();
         setInfoHidden((v) => !v);
-      }}>i</button>
-      <button id="lbPrev" aria-label="previous" disabled={index === 0} onClick={(e) => {
+      }}><IconInfo size={18} /></button>
+      <button id="lbPrev" aria-label="Previous" disabled={index === 0} onClick={(e) => {
         e.stopPropagation();
         if (index > 0) onNavigate(index - 1);
-      }}>‹</button>
-      <button id="lbNext" aria-label="next" disabled={index === mediaList.length - 1} onClick={(e) => {
+      }}><IconChevronLeft size={22} /></button>
+      <button id="lbNext" aria-label="Next" disabled={index === mediaList.length - 1} onClick={(e) => {
         e.stopPropagation();
         if (index < mediaList.length - 1) onNavigate(index + 1);
-      }}>›</button>
+      }}><IconChevronRight size={22} /></button>
 
       <div id="lbContent">
-        <LightboxMedia mediaPath={localPath} kind={m.kind} fallbackUrl={m.url} />
+        <LightboxMedia mediaPath={localPath} kind={m.kind} />
       </div>
 
       <aside id="lbInfo">
@@ -63,7 +64,7 @@ export function Lightbox({ mediaList, index, onClose, onNavigate }: LightboxProp
             {b.displayName} <span style={{ color: "rgba(255,255,255,0.55)", fontWeight: 400 }}>@{b.username}</span>
           </a>
           <a id="lbDate" href={b.url} target="_blank" rel="noopener">
-            {fmtDate(b.createdAt)} · open tweet →
+            {fmtDate(b.createdAt)} <IconExternal size={12} /> open tweet
           </a>
         </div>
         {b.text ? (
@@ -72,10 +73,10 @@ export function Lightbox({ mediaList, index, onClose, onNavigate }: LightboxProp
           <div id="lbText"><em style={{ color: "rgba(255,255,255,0.4)" }}>(no text)</em></div>
         )}
         <div id="lbStats">
-          <span>&#x1F4AC; {fmtNum(b.replyCount)}</span>
-          <span>&#x1F501; {fmtNum(b.retweetCount)}</span>
-          <span>&#x2764; {fmtNum(b.favoriteCount)}</span>
-          <span>&#x1F4AC; {fmtNum(b.quoteCount)}</span>
+          <span><IconReply size={14} /> {fmtNum(b.replyCount)}</span>
+          <span><IconRetweet size={14} /> {fmtNum(b.retweetCount)}</span>
+          <span><IconHeart size={14} /> {fmtNum(b.favoriteCount)}</span>
+          <span><IconQuote size={14} /> {fmtNum(b.quoteCount)}</span>
         </div>
       </aside>
     </div>
@@ -83,21 +84,21 @@ export function Lightbox({ mediaList, index, onClose, onNavigate }: LightboxProp
 }
 
 function LightboxMedia({
-  mediaPath, kind, fallbackUrl,
+  mediaPath, kind,
 }: {
-  mediaPath: string; kind: "photo" | "video"; fallbackUrl: string;
+  mediaPath: string; kind: "photo" | "video";
 }) {
-  const [fallback, setFallback] = useState(false);
+  // Offline-only: no remote fallback. If the file isn't on disk, show a placeholder.
+  const [missing, setMissing] = useState(false);
+  if (missing) {
+    return <div style={{ color: "rgba(255,255,255,0.7)", padding: 24 }}>{kind === "video" ? "Video" : "Image"} not available offline</div>;
+  }
   if (kind === "video") {
     return (
-      <video src={mediaPath} controls autoPlay playsInline />
+      <video src={mediaPath} controls autoPlay playsInline onError={() => setMissing(true)} />
     );
   }
   return (
-    <img
-      src={fallback ? fallbackUrl : mediaPath}
-      alt=""
-      onError={() => setFallback(true)}
-    />
+    <img src={mediaPath} alt="" onError={() => setMissing(true)} />
   );
 }

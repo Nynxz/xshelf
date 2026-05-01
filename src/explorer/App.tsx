@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useState, useCallback } from "preact/hooks";
 import type { Bookmark, Manifest } from "../lib/types";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
-import { Header, type SortKey, type ViewMode, type MediaFilter } from "./Header";
+import { Header, type SortKey, type ViewMode, type MediaFilter, type ImageFit, type DisplaySize } from "./Header";
 import { BookmarkCard } from "./BookmarkCard";
 import { GridTile, type MediaPair } from "./GridTile";
 import { Lightbox } from "./Lightbox";
 
 const PAGE_SIZE = 50;
 const GRID_PAGE_SIZE = 200;
+
+// Single "size" knob drives both list-view row height and grid-view tile width.
+const SIZE_PRESETS: Record<DisplaySize, { gridMin: string; rowHeight: string }> = {
+  small:  { gridMin: "120px", rowHeight: "160px" },
+  medium: { gridMin: "180px", rowHeight: "220px" },
+  large:  { gridMin: "260px", rowHeight: "300px" },
+};
 
 export function App() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
@@ -20,8 +27,51 @@ export function App() {
   const [renderedCount, setRenderedCount] = useState(PAGE_SIZE);
   const [lbIndex, setLbIndex] = useState(-1);
 
-  // Load bookmarks from chrome.storage on mount.
+  // Display preferences (persisted to localStorage so they stick across reloads).
+  const [imageFit, setImageFit] = useState<ImageFit>(() => {
+    try { return (localStorage.getItem("xbd-image-fit") as ImageFit) || "contain"; } catch { return "contain"; }
+  });
+  const [size, setSize] = useState<DisplaySize>(() => {
+    try { return (localStorage.getItem("xbd-display-size") as DisplaySize) || "medium"; } catch { return "medium"; }
+  });
+
+  // Push display prefs into CSS custom properties on <html>.
   useEffect(() => {
+    document.documentElement.style.setProperty("--media-fit", imageFit);
+    try { localStorage.setItem("xbd-image-fit", imageFit); } catch {}
+  }, [imageFit]);
+  useEffect(() => {
+    const preset = SIZE_PRESETS[size];
+    document.documentElement.style.setProperty("--grid-min", preset.gridMin);
+    document.documentElement.style.setProperty("--media-row-height", preset.rowHeight);
+    try { localStorage.setItem("xbd-display-size", size); } catch {}
+  }, [size]);
+
+  // Two modes:
+  // 1) Snapshot mode (file:// or extension page): bookmarks inlined as
+  //    <script id="xbd-data" type="application/json">...</script>. Used when
+  //    the SW exports a self-contained HTML to ~/Downloads/<folder>/explorer.html.
+  // 2) Live mode (chrome-extension page): read from chrome.storage and
+  //    subscribe to changes so the UI updates while a sync runs.
+  useEffect(() => {
+    const dataEl = document.getElementById("xbd-data");
+    if (dataEl?.textContent && dataEl.textContent.trim() !== "" && !dataEl.textContent.includes("__BOOKMARKS_DATA__")) {
+      try {
+        const parsed = JSON.parse(dataEl.textContent) as {
+          bookmarks: Bookmark[];
+          lastRun?: { finishedAt: string };
+        };
+        setBookmarks(parsed.bookmarks);
+        setLastRunFinishedAt(parsed.lastRun?.finishedAt ?? null);
+        return; // snapshot mode — don't touch chrome.* at all
+      } catch {
+        // fall through to live mode
+      }
+    }
+
+    // Live mode — only available inside the extension context.
+    if (typeof chrome === "undefined" || !chrome.storage?.local) return;
+
     chrome.storage.local.get("xbd_manifest_v1").then((data) => {
       const m = (data["xbd_manifest_v1"] as Manifest | undefined) ?? null;
       if (m) {
@@ -29,7 +79,6 @@ export function App() {
         setLastRunFinishedAt(m.lastRun?.finishedAt ?? null);
       }
     });
-    // Re-load if storage changes (e.g., a sync finishes while explorer is open).
     const onChanged = (changes: Record<string, chrome.storage.StorageChange>) => {
       if (changes["xbd_manifest_v1"]) {
         const m = changes["xbd_manifest_v1"].newValue as Manifest | undefined;
@@ -82,6 +131,19 @@ export function App() {
     return list;
   }, [filtered]);
 
+  // Lookup table for opening the lightbox from a list-view card click.
+  // Maps "<tweetId>_<mediaIndex>" → position in `mediaList`.
+  const mediaIndexLookup = useMemo(() => {
+    const map = new Map<string, number>();
+    mediaList.forEach((p, i) => map.set(`${p.b.id}_${p.m.index}`, i));
+    return map;
+  }, [mediaList]);
+
+  const openLightboxFor = useCallback((bookmarkId: string, mediaIndex: number) => {
+    const idx = mediaIndexLookup.get(`${bookmarkId}_${mediaIndex}`);
+    if (idx != null) setLbIndex(idx);
+  }, [mediaIndexLookup]);
+
   const items = view === "grid" ? mediaList : filtered;
   const visible = items.slice(0, renderedCount);
 
@@ -91,15 +153,16 @@ export function App() {
     <>
       <Header
         count={items.length}
-        total={view === "grid" ? bookmarks.length : bookmarks.length}
+        total={bookmarks.length}
         userCounts={userCounts}
         view={view} setView={setView}
         sortBy={sortBy} setSortBy={setSortBy}
         searchQuery={searchQuery} setSearchQuery={setSearchQuery}
         userFilter={userFilter} setUserFilter={setUserFilter}
         mediaFilter={mediaFilter} setMediaFilter={setMediaFilter}
+        imageFit={imageFit} setImageFit={setImageFit}
+        size={size} setSize={setSize}
         lastRunFinishedAt={lastRunFinishedAt}
-        viewMode={view}
       />
 
       <main class={view === "grid" ? "view-grid" : ""}>
@@ -110,7 +173,9 @@ export function App() {
             <GridTile key={`${pair.b.id}_${pair.m.index}`} pair={pair} onClick={() => setLbIndex(i)} />
           ))
         ) : (
-          (visible as Bookmark[]).map((b) => <BookmarkCard key={b.id} bookmark={b} />)
+          (visible as Bookmark[]).map((b) => (
+            <BookmarkCard key={b.id} bookmark={b} onOpenLightbox={openLightboxFor} />
+          ))
         )}
         {renderedCount < items.length && (
           <button class="load-more" onClick={() => setRenderedCount((n) => n + (view === "grid" ? GRID_PAGE_SIZE : PAGE_SIZE))}>

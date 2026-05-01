@@ -11,6 +11,33 @@ export function App() {
   const [maxPages, setMaxPages] = useState(200);
   const [incremental, setIncremental] = useState(true);
 
+  // Find the most recent on-disk explorer.html snapshot and open it. Uses
+  // chrome.downloads.open which respects the user's click as a "gesture" and
+  // launches the file in the default app (the browser, for HTML).
+  async function openSnapshot() {
+    try {
+      const items = await chrome.downloads.search({
+        filenameRegex: ".*explorer\\.html$",
+        state: "complete",
+        limit: 1,
+        orderBy: ["-startTime"],
+      });
+      if (items.length === 0) {
+        alert("No snapshot yet — run a sync first.");
+        return;
+      }
+      try {
+        chrome.downloads.open(items[0].id);
+      } catch {
+        // chrome.downloads.open requires a user gesture and may fail; fall back
+        // to revealing the file in the system file manager.
+        chrome.downloads.show(items[0].id);
+      }
+    } catch (e) {
+      alert("Couldn't open snapshot: " + ((e as Error).message ?? String(e)));
+    }
+  }
+
   async function refresh() {
     try {
       const r = await send({ type: "getRunState" });
@@ -88,13 +115,18 @@ export function App() {
           await send({ type: "wipeAll" });
           refresh();
         }}
-        onOpenExplorer={() => send({ type: "openExplorer" })}
+        onOpenExplorer={openSnapshot}
       />
 
       <div class="status hint">
         <strong>How it works:</strong> <em>Sync</em> reads X's bookmarks API and reconciles
         with your manifest. Click <em>Download</em> to fetch new media or <em>Discard</em> to skip.
         The run lives in the service worker — close and reopen this popup any time.
+        <br /><br />
+        After each sync, a self-contained <code>{(folder || "x-bookmarks") + "/explorer.html"}</code> is written
+        to your Downloads folder. Open that file from your file manager for full media browsing.
+        The "Open explorer" button below opens the live in-browser version (faster, but local
+        videos won't play there).
         <br /><br />
         Open <a href="#" onClick={(e) => { e.preventDefault(); chrome.tabs.create({ url: "https://x.com/i/bookmarks" }); }}>x.com/i/bookmarks</a>
         {" "}first so the extension can capture your session.

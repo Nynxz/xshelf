@@ -2,8 +2,15 @@ import { useState } from "preact/hooks";
 import type { Bookmark, Media } from "../lib/types";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
 import { fmtDate, fmtNum, linkify } from "./util";
+import { IconReply, IconRetweet, IconHeart, IconQuote } from "./icons";
 
-export function BookmarkCard({ bookmark }: { bookmark: Bookmark }) {
+export function BookmarkCard({
+  bookmark,
+  onOpenLightbox,
+}: {
+  bookmark: Bookmark;
+  onOpenLightbox: (bookmarkId: string, mediaIndex: number) => void;
+}) {
   return (
     <article class="card">
       <div class="card-header">
@@ -23,29 +30,42 @@ export function BookmarkCard({ bookmark }: { bookmark: Bookmark }) {
       {bookmark.media.length > 0 && (
         <div class="media">
           {bookmark.media.map((m) => (
-            <MediaItem key={m.index} bookmark={bookmark} media={m} />
+            <MediaItem
+              key={m.index}
+              bookmark={bookmark}
+              media={m}
+              onOpen={() => onOpenLightbox(bookmark.id, m.index)}
+            />
           ))}
         </div>
       )}
       <div class="stats">
-        <span>&#x1F4AC; {fmtNum(bookmark.replyCount)}</span>
-        <span>&#x1F501; {fmtNum(bookmark.retweetCount)}</span>
-        <span>&#x2764; {fmtNum(bookmark.favoriteCount)}</span>
-        <span>&#x1F4AC; {fmtNum(bookmark.quoteCount)}</span>
+        <span><IconReply size={14} /> {fmtNum(bookmark.replyCount)}</span>
+        <span><IconRetweet size={14} /> {fmtNum(bookmark.retweetCount)}</span>
+        <span><IconHeart size={14} /> {fmtNum(bookmark.favoriteCount)}</span>
+        <span><IconQuote size={14} /> {fmtNum(bookmark.quoteCount)}</span>
       </div>
     </article>
   );
 }
 
-function MediaItem({ bookmark, media }: { bookmark: Bookmark; media: Media }) {
+function MediaItem({
+  bookmark,
+  media,
+  onOpen,
+}: {
+  bookmark: Bookmark;
+  media: Media;
+  onOpen: () => void;
+}) {
   const safeUser = sanitizeUsername(bookmark.username);
   const ext = media.kind === "video" ? "mp4" : (extFromUrl(media.url) ?? "jpg");
   const localPath = `media/${safeUser}/${bookmark.id}_${media.index}.${ext}`;
   const [missing, setMissing] = useState(false);
-  const [fallback, setFallback] = useState(false);
 
+  // Strictly offline: never fall back to pbs.twimg.com / video.twimg.com URLs.
   if (missing) {
-    return <div class="missing">{media.kind === "video" ? "Video" : "Image"} not on disk — open original tweet</div>;
+    return <div class="missing">{media.kind === "video" ? "Video" : "Image"} not available offline</div>;
   }
 
   if (media.kind === "video") {
@@ -56,17 +76,12 @@ function MediaItem({ bookmark, media }: { bookmark: Bookmark; media: Media }) {
     );
   }
 
+  // Click on a photo opens the shared lightbox. Lets the user navigate
+  // adjacent media with arrow keys and close with Esc, instead of opening
+  // a separate browser tab they'd have to back out of.
   return (
-    <a href={fallback ? media.url : localPath} target="_blank" rel="noopener">
-      <img
-        src={fallback ? media.url : localPath}
-        loading="lazy"
-        alt=""
-        onError={() => {
-          if (fallback) setMissing(true);
-          else setFallback(true);
-        }}
-      />
-    </a>
+    <button class="media-btn" type="button" onClick={onOpen} aria-label="View image">
+      <img src={localPath} loading="lazy" alt="" onError={() => setMissing(true)} />
+    </button>
   );
 }
