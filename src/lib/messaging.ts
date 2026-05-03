@@ -6,12 +6,13 @@ import type { CapturedSummary, Manifest, RuntimeState, SyncOptions } from "./typ
  */
 export type RequestMessage =
   | { type: "getRunState" }
-  | { type: "getManifest" }
+  | { type: "getManifest"; source?: import("./types").SourceKey }
   | { type: "startSync"; options: SyncOptions }
   | { type: "startDownload" }
   | { type: "discardPending" }
   | { type: "cancelBackup" }
-  | { type: "clearManifest" }
+  | { type: "clearManifest"; source?: import("./types").SourceKey }
+  | { type: "listSources" }
   | { type: "wipeAll" };
 
 export type ResponseFor<T extends RequestMessage["type"]> =
@@ -25,7 +26,7 @@ export type ResponseFor<T extends RequestMessage["type"]> =
 export type BroadcastMessage =
   | { type: "stateUpdate"; state: RuntimeState };
 
-export const SW_VERSION = "v23-cursor-stop-empty";
+export const SW_VERSION = "v24-canonical-vars";
 
 export function send<T extends RequestMessage>(
   msg: T,

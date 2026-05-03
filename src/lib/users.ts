@@ -106,11 +106,15 @@ async function fetchUserGraphQLPage(
 ): Promise<unknown> {
   const { userId, queryId, cursor, captured, host = "x.com" } = args;
   if (!captured.auth) throw new Error("No auth");
+  // Variable shape mirrors what x.com's web client sends. Some of these flags
+  // (withClientEventToken, withBirdwatchNotes) are tolerated for the initial
+  // request but cause cursor-based follow-ups to return empty pages if missing.
   const variables: Record<string, unknown> = {
     userId,
-    count: 40,
+    count: 20,
     includePromotedContent: false,
-    withQuickPromoteEligibilityTweetFields: false,
+    withClientEventToken: false,
+    withBirdwatchNotes: false,
     withVoice: true,
     withV2Timeline: true,
   };
@@ -118,6 +122,9 @@ async function fetchUserGraphQLPage(
   const url = new URL(`https://${host}/i/api/graphql/${queryId}/${operation}`);
   url.searchParams.set("variables", JSON.stringify(variables));
   url.searchParams.set("features", JSON.stringify(USER_TWEETS_FEATURES));
+  // X's web client also sends a fieldToggles param; some queryId rotations
+  // require it for cursor-based pagination to return new content.
+  url.searchParams.set("fieldToggles", JSON.stringify({ withArticlePlainText: false }));
 
   const res = await fetch(url.toString(), {
     method: "GET",

@@ -23,6 +23,7 @@ import {
   clearManifest,
   clearPending,
   freshRuntime,
+  listSources,
   loadCaptured,
   loadManifest,
   loadPending,
@@ -450,8 +451,11 @@ export default defineBackground({
           }
           const { entries, nextCursor, raw, stopOnEmptyResponse } = ctx.extractEntries(json);
           if (raw) {
+            const cursorTag = nextCursor
+              ? `next=${nextCursor.slice(0, 12)}…${stopOnEmptyResponse ? " stopOnEmpty" : ""}`
+              : "no-cursor";
             appendLog(
-              `Page ${runtime.pageCount} raw: ${raw.items} items, ${raw.modules} modules, ${raw.cursors} cursors, ${raw.other} other → ${entries.length} parsable`,
+              `Page ${runtime.pageCount} raw: ${raw.items} items, ${raw.modules} modules, ${raw.cursors} cursors, ${raw.other} other → ${entries.length} parsable (${cursorTag})`,
             );
           }
           // Bail if X is feeding us cursor-only pages. Two signals trigger this:
@@ -971,15 +975,19 @@ export default defineBackground({
               return;
             }
             case "clearManifest": {
-              // Phase 0: only the bookmarks source. Phase 2 will let the user
-              // choose which source(s) to clear from the popup.
-              await clearManifest("bookmarks");
+              // Source-aware so the popup can wipe just the active source.
+              await clearManifest((msg.source as SourceKey | undefined) ?? "bookmarks");
               sendResponse({ ok: true });
               return;
             }
             case "getManifest": {
-              const m = await loadManifest("bookmarks");
+              const m = await loadManifest((msg.source as SourceKey | undefined) ?? "bookmarks");
               sendResponse({ ok: true, manifest: m });
+              return;
+            }
+            case "listSources": {
+              const sources = await listSources();
+              sendResponse({ ok: true, sources });
               return;
             }
             case "wipeAll": {

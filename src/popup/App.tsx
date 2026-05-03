@@ -81,7 +81,10 @@ export function App() {
         setCaptured(r.captured);
         setVersion(r.version);
       }
-      const m = await send({ type: "getManifest" });
+      // Show stats for whatever source the user is about to sync — bookmarks
+      // by default, the @handle's archive when in user-archive mode.
+      const target = computedSource ?? "bookmarks";
+      const m = await send({ type: "getManifest", source: target });
       if (m.ok) setManifest(m.manifest);
     } catch {
       // service worker isn't reachable
@@ -100,6 +103,12 @@ export function App() {
       chrome.runtime.onMessage.removeListener(onMessage);
     };
   }, []);
+
+  // Re-fetch the manifest stats when the active source changes so the popup
+  // shows the right history count (bookmarks vs @handle's archive).
+  useEffect(() => {
+    refresh();
+  }, [sourceMode, userHandle, detectedHandle]);
 
   const status = state?.status ?? "idle";
   const versionMismatch = version != null && version !== SW_VERSION;
@@ -188,8 +197,14 @@ export function App() {
           await send({ type: "discardPending" });
         }}
         onReset={async () => {
-          if (!confirm("Reset history? Files on disk are not deleted; the audit will reconcile them.")) return;
-          await send({ type: "clearManifest" });
+          // Wipe just the manifest of whatever source the user has selected.
+          // Files on disk aren't deleted; the next sync's audit will reconcile
+          // anything that's still present.
+          const target = computedSource ?? "bookmarks";
+          const label =
+            target === "bookmarks" ? "your bookmarks history" : `the @${effectiveHandle} archive`;
+          if (!confirm(`Reset ${label}?\nFiles on disk are not deleted.`)) return;
+          await send({ type: "clearManifest", source: target });
           refresh();
         }}
         onWipe={async () => {
