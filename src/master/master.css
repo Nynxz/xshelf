@@ -15,7 +15,10 @@
 }
 
 .master-layout .main-pane {
-  min-width: 0; /* lets child shrink so flex/grid contents don't overflow */
+  grid-column: 2; /* pin to second track even when the sidebar is display:none,
+                   * otherwise grid auto-placement drops main-pane into track 1
+                   * (which collapses to 0 when the sidebar is hidden). */
+  min-width: 0;   /* lets child shrink so flex/grid contents don't overflow */
 }
 
 /* The stand-alone explorer caps header/grid width at 1280px and centers them
