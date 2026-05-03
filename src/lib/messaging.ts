@@ -1,4 +1,4 @@
-import type { CapturedSummary, Manifest, RuntimeState, SyncOptions } from "./types";
+import type { CapturedSummary, Manifest, RuntimeState, SourceKey, SyncOptions } from "./types";
 
 /**
  * The full set of typed messages the popup/explorer can send to the background.
@@ -20,13 +20,15 @@ export type ResponseFor<T extends RequestMessage["type"]> =
     ? { ok: true; version: string; state: RuntimeState; captured: CapturedSummary }
     : T extends "getManifest"
       ? { ok: true; manifest: Manifest }
-      : { ok: true } | { ok: false; error: string };
+      : T extends "listSources"
+        ? { ok: true; sources: SourceKey[] } | { ok: false; error: string }
+        : { ok: true } | { ok: false; error: string };
 
 /** Server-pushed events */
 export type BroadcastMessage =
   | { type: "stateUpdate"; state: RuntimeState };
 
-export const SW_VERSION = "v29-sidebar-toggle";
+export const SW_VERSION = "v30-popup-tabs";
 
 export function send<T extends RequestMessage>(
   msg: T,
