@@ -452,11 +452,20 @@ export default defineBackground({
           const { entries, nextCursor, raw, stopOnEmptyResponse } = ctx.extractEntries(json);
           if (raw) {
             const cursorTag = nextCursor
-              ? `next=${nextCursor.slice(0, 12)}…${stopOnEmptyResponse ? " stopOnEmpty" : ""}`
+              ? `next=${nextCursor.slice(0, 30)}…${stopOnEmptyResponse ? " stopOnEmpty" : ""}`
               : "no-cursor";
             appendLog(
               `Page ${runtime.pageCount} raw: ${raw.items} items, ${raw.modules} modules, ${raw.cursors} cursors, ${raw.other} other → ${entries.length} parsable (${cursorTag})`,
             );
+            // On empty content pages, log a tiny snippet of the response so we
+            // can tell if X is serving a different shape, an error envelope, or
+            // genuinely an empty timeline. Capped to keep PII / secrets out.
+            if (entries.length === 0) {
+              try {
+                const sample = JSON.stringify(json).slice(0, 280);
+                appendLog(`Page ${runtime.pageCount} response head: ${sample}`);
+              } catch {}
+            }
           }
           // Bail if X is feeding us cursor-only pages. Two signals trigger this:
           // (a) the cursor explicitly says stopOnEmptyResponse, or
@@ -556,7 +565,10 @@ export default defineBackground({
           // similar endpoints can return cursor-only pages while warming up.
           if (!nextCursor || nextCursor === cursor) break;
           cursor = nextCursor;
-          await sleep(800 + Math.random() * 600);
+          // 1.8–2.6s between user-archive pages — X tends to throttle
+          // tighter cadences to empty responses. Bookmarks is more lenient
+          // but the same pacing is fine.
+          await sleep(1800 + Math.random() * 800);
         }
 
         // ---- Pre-flight: drop pending entries already in Chrome's download history

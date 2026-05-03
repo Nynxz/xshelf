@@ -129,6 +129,12 @@ async function fetchUserGraphQLPage(
   const res = await fetch(url.toString(), {
     method: "GET",
     credentials: "include",
+    // `referrer` is the spec-compliant way to set Referer in fetch options;
+    // Chrome respects it from the SW context. X uses Referer as a soft signal
+    // to distinguish web-client traffic from API users; without it, cursor-
+    // driven pagination tends to return empty "ghost" pages.
+    referrer: `https://${host}/`,
+    referrerPolicy: "strict-origin-when-cross-origin",
     headers: {
       authorization: captured.auth.authorization,
       "x-csrf-token": captured.auth.csrf,
