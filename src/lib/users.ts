@@ -248,11 +248,33 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
     raw.other++;
   }
 
-  for (const ins of instructions as Array<{ type?: string; entries?: AnyEntry[]; entry?: AnyEntry }>) {
+  type Instruction = {
+    type?: string;
+    entries?: AnyEntry[];
+    entry?: AnyEntry;
+    /** TimelineAddToModule appends to a previously-created module. UserMedia
+     *  uses this from page 2 onward — page 1 creates `profile-grid-0` via
+     *  TimelineAddEntries with a TimelineTimelineModule entry; subsequent
+     *  pages just hand back more items to drop into that grid. */
+    moduleItems?: Array<{ item?: { itemContent?: unknown } }>;
+    moduleEntryId?: string;
+  };
+
+  for (const ins of instructions as Instruction[]) {
     if (ins.type === "TimelineAddEntries" && Array.isArray(ins.entries)) {
       for (const e of ins.entries) consume(e);
     } else if (ins.type === "TimelinePinEntry" && ins.entry) {
       consume(ins.entry);
+    } else if (Array.isArray(ins.moduleItems)) {
+      // TimelineAddToModule (or any instruction that carries moduleItems):
+      // unwrap each item exactly like we do for inline TimelineTimelineModule
+      // entries on page 1.
+      raw.modules++;
+      for (const mi of ins.moduleItems) {
+        const itemContent = mi?.item?.itemContent;
+        if (!itemContent) continue;
+        flat.push({ content: { entryType: "TimelineTimelineItem", itemContent } });
+      }
     }
   }
 
