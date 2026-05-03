@@ -254,7 +254,12 @@ export default defineBackground({
       source: SourceKey;
       description: string; // for log lines
       fetchPage(cursor: string | null): Promise<unknown>;
-      extractEntries(json: unknown): { entries: unknown[]; nextCursor: string | null };
+      extractEntries(json: unknown): {
+        entries: unknown[];
+        nextCursor: string | null;
+        /** Optional per-shape counts for diagnostic logging. */
+        raw?: { items: number; modules: number; cursors: number; other: number };
+      };
       acceptEntry(entry: unknown): boolean;
     }
 
@@ -437,7 +442,12 @@ export default defineBackground({
             }
             throw e;
           }
-          const { entries, nextCursor } = ctx.extractEntries(json);
+          const { entries, nextCursor, raw } = ctx.extractEntries(json);
+          if (raw) {
+            appendLog(
+              `Page ${runtime.pageCount} raw: ${raw.items} items, ${raw.modules} modules, ${raw.cursors} cursors, ${raw.other} other → ${entries.length} parsable`,
+            );
+          }
           let newOnPage = 0;
 
           for (const entry of entries) {
@@ -513,7 +523,10 @@ export default defineBackground({
           await saveManifest(manifest);
 
           if (stoppedEarly) break;
-          if (!nextCursor || nextCursor === cursor || entries.length === 0) break;
+          // Bail when the cursor doesn't move (no more pages) OR we have no
+          // cursor at all. Don't bail on empty entries alone — UserMedia and
+          // similar endpoints can return cursor-only pages while warming up.
+          if (!nextCursor || nextCursor === cursor) break;
           cursor = nextCursor;
           await sleep(800 + Math.random() * 600);
         }

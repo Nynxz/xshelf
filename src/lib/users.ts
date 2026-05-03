@@ -149,29 +149,39 @@ export function fetchUserMediaPage(args: FetchUserTweetsArgs): Promise<unknown> 
 export interface ExtractedUserPage {
   entries: unknown[];
   nextCursor: string | null;
+  /** Diagnostic counts for the run-log: helps tell extractor bugs from parser bugs. */
+  raw?: { items: number; modules: number; cursors: number; other: number };
 }
 
 export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
-  // Walks `data.user.result.timeline.timeline.instructions[]` (or the legacy
-  // singular `timeline.instructions` form some endpoints still use) and returns
-  // a flattened list of *tweet-shaped entries*. Module-wrapped tweets (the
-  // /<user>/media grid uses TimelineTimelineModule with items[] arrays) are
-  // unwrapped into synthetic TimelineTimelineItem entries so parseTweetEntry
-  // (which reads content.itemContent) handles both layouts uniformly.
+  // Walks the timeline instructions and returns a flattened list of *tweet-shaped
+  // entries*. Module-wrapped tweets (the /<user>/media grid uses
+  // TimelineTimelineModule with items[] arrays) are unwrapped into synthetic
+  // TimelineTimelineItem entries so parseTweetEntry (which reads
+  // content.itemContent) handles both layouts uniformly.
+  //
+  // X's response shape varies across endpoints / queryId rotations; we try
+  // every path we've seen in the wild.
   const j = json as {
     data?: {
       user?: {
         result?: {
           timeline?: { timeline?: { instructions?: unknown[] }; instructions?: unknown[] };
+          timeline_v2?: { timeline?: { instructions?: unknown[] }; instructions?: unknown[] };
         };
       };
     };
   };
-  const root = j?.data?.user?.result?.timeline;
-  const instructions = root?.timeline?.instructions ?? root?.instructions ?? [];
+  const result = j?.data?.user?.result;
+  const root = result?.timeline_v2 ?? result?.timeline;
+  const instructions =
+    root?.timeline?.instructions ??
+    root?.instructions ??
+    [];
 
   const flat: unknown[] = [];
   let nextCursor: string | null = null;
+  const raw = { items: 0, modules: 0, cursors: 0, other: 0 };
 
   type AnyEntry = {
     content?: {
@@ -186,16 +196,22 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
 
   function consume(entry: AnyEntry): void {
     const c = entry?.content;
-    if (!c) return;
+    if (!c) {
+      raw.other++;
+      return;
+    }
     if (c.entryType === "TimelineTimelineCursor") {
+      raw.cursors++;
       if (c.cursorType === "Bottom" && c.value) nextCursor = c.value;
       return;
     }
     if (c.entryType === "TimelineTimelineItem") {
+      raw.items++;
       flat.push(entry);
       return;
     }
     if (c.entryType === "TimelineTimelineModule" && Array.isArray(c.items)) {
+      raw.modules++;
       for (const mi of c.items) {
         const itemContent = mi?.item?.itemContent;
         if (!itemContent) continue;
@@ -203,7 +219,9 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
         // looks at content.itemContent, so this is enough.
         flat.push({ content: { entryType: "TimelineTimelineItem", itemContent } });
       }
+      return;
     }
+    raw.other++;
   }
 
   for (const ins of instructions as Array<{ type?: string; entries?: AnyEntry[]; entry?: AnyEntry }>) {
@@ -214,7 +232,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
     }
   }
 
-  return { entries: flat, nextCursor };
+  return { entries: flat, nextCursor, raw };
 }
 
 /**
