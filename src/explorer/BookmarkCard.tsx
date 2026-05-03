@@ -1,7 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Bookmark, Media } from "../lib/types";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
-import { fmtDate, fmtNum, linkify } from "./util";
+import { fmtDate, fmtNum, linkify, mediaPath } from "./util";
 import { IconReply, IconRetweet, IconHeart, IconQuote } from "./icons";
 
 export function BookmarkCard({
@@ -60,7 +60,7 @@ function MediaItem({
 }) {
   const safeUser = sanitizeUsername(bookmark.username);
   const ext = media.kind === "video" ? "mp4" : (extFromUrl(media.url) ?? "jpg");
-  const localPath = `media/${safeUser}/${bookmark.id}_${media.index}.${ext}`;
+  const localPath = mediaPath(safeUser, bookmark.id, media.index, ext);
   const [missing, setMissing] = useState(false);
 
   // Strictly offline: never auto-fetch from pbs.twimg.com / video.twimg.com.

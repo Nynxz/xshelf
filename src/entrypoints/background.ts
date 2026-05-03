@@ -223,22 +223,25 @@ export default defineBackground({
     // === RUN: SYNC PHASE ===
     /**
      * Compute the relative on-disk path a media item will be (or was) written to.
-     * Single source of truth shared by audit, pre-flight, and runDownload, so
-     * "where will this file live" is consistent across phases.
+     *
+     * Layout (since phase 1f): one shared media tree at `<folder>/media/<author>/`
+     * regardless of which source the item belongs to. A tweet present in both
+     * bookmarks AND a user archive lives once on disk; the two manifests both
+     * reference the same file. Eliminates the "same-URL-different-path" class
+     * of bug from earlier phases entirely.
      */
     function expectedMediaPath(
       folder: string,
-      source: SourceKey,
+      _source: SourceKey,
       tweetId: string,
       username: string,
       mediaIndex: number,
       kind: PendingMediaItem["kind"],
       url: string,
     ): string {
-      const sourcePath = sourceDiskPath(source);
       const safeUser = sanitizeUsername(username);
       const ext = kind === "video" ? "mp4" : extFromUrl(url) ?? "jpg";
-      return `${folder}/${sourcePath}/media/${safeUser}/${tweetId}_${mediaIndex}.${ext}`;
+      return `${folder}/media/${safeUser}/${tweetId}_${mediaIndex}.${ext}`;
     }
 
     /**
@@ -642,16 +645,19 @@ export default defineBackground({
       const manifest = await loadManifest(source);
 
       try {
-        const sourcePath = sourceDiskPath(source);
         while (pendingMedia.length > 0) {
           if (cancelFlag) break;
           const item = pendingMedia[0];
-          const ext = item.kind === "video" ? "mp4" : extFromUrl(item.url) ?? "jpg";
-          const safeUser = sanitizeUsername(item.username);
-          // <folder>/<sourcePath>/media/<author>/<tweetId>_<n>.<ext>
-          // e.g. xshelf/bookmarks/media/elonmusk/1234_0.jpg
-          //      xshelf/users/naval/media/<id>_<n>.jpg (in phase 1)
-          const filename = `${folder}/${sourcePath}/media/${safeUser}/${item.tweetId}_${item.mediaIndex}.${ext}`;
+          // Single shared media tree: xshelf/media/<author>/<id>_<n>.<ext>
+          const filename = expectedMediaPath(
+            folder,
+            source,
+            item.tweetId,
+            item.username,
+            item.mediaIndex,
+            item.kind,
+            item.url,
+          );
           try {
             await downloadFile(item.url, filename, "overwrite");
             const t = manifest.bookmarks[item.tweetId];
@@ -755,8 +761,15 @@ export default defineBackground({
 
     async function writeSnapshot(folder: string, manifest: Manifest): Promise<void> {
       try {
-        const sourcePath = sourceDiskPath(manifest.source);
+        const sourcePath = sourceDiskPath(manifest.source); // "bookmarks" or "users/<handle>"
         const html = snapshotTemplate;
+
+        // Relative path from this explorer.html's directory back up to the
+        // shared `<folder>/media/` tree. Bookmarks lives one level deep
+        // (`bookmarks/explorer.html` → `../media/`); user archives live two
+        // levels deep (`users/<h>/explorer.html` → `../../media/`).
+        const depth = sourcePath.split("/").length;
+        const mediaPathPrefix = "../".repeat(depth) + "media/";
 
         const sortedBookmarks = Object.values(manifest.bookmarks).sort((a, b) => {
           const ta = a.lastSeenAt ? Date.parse(a.lastSeenAt) || 0 : 0;
@@ -769,6 +782,8 @@ export default defineBackground({
           exportedAt: new Date().toISOString(),
           count: sortedBookmarks.length,
           lastRun: manifest.lastRun,
+          source: manifest.source,
+          mediaPathPrefix,
           bookmarks: sortedBookmarks,
         }).replace(/<\/script/gi, "<\\/script");
         const dataTag = `<script id="xbd-data" type="application/json">${payload}</script>`;
@@ -782,7 +797,7 @@ export default defineBackground({
           "data:text/html;charset=utf-8," + encodeURIComponent(injected);
         // Per-source self-contained explorer. e.g.:
         //   xshelf/bookmarks/explorer.html
-        //   xshelf/users/elonmusk/explorer.html (in phase 1)
+        //   xshelf/users/elonmusk/explorer.html
         // Phase 2 will add a master xshelf/index.html that aggregates sources.
         await downloadFile(dataUrl, `${folder}/${sourcePath}/explorer.html`, "overwrite");
       } catch (e) {

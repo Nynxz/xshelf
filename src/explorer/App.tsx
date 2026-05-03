@@ -60,7 +60,12 @@ export function App() {
         const parsed = JSON.parse(dataEl.textContent) as {
           bookmarks: Bookmark[];
           lastRun?: { finishedAt: string };
+          mediaPathPrefix?: string;
         };
+        // Stash the snapshot's media path prefix on window so card/grid/lightbox
+        // components don't have to thread it through. Defaults to "media/" for
+        // legacy snapshots that didn't carry the field.
+        (window as any).xshelfMediaPrefix = parsed.mediaPathPrefix ?? "media/";
         setBookmarks(parsed.bookmarks);
         setLastRunFinishedAt(parsed.lastRun?.finishedAt ?? null);
         return; // snapshot mode — don't touch chrome.* at all
@@ -68,6 +73,8 @@ export function App() {
         // fall through to live mode
       }
     }
+    // Live mode default (chrome-extension page): no inline data, media at top level
+    if (!(window as any).xshelfMediaPrefix) (window as any).xshelfMediaPrefix = "media/";
 
     // Live mode — only available inside the extension context.
     if (typeof chrome === "undefined" || !chrome.storage?.local) return;

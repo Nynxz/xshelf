@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { Bookmark, Media } from "../lib/types";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
+import { mediaPath } from "./util";
 import { IconPlay } from "./icons";
 
 export interface MediaPair {
@@ -14,7 +15,7 @@ export function GridTile({ pair, onClick }: { pair: MediaPair; onClick: () => vo
 
   const safeUser = sanitizeUsername(b.username);
   const ext = m.kind === "video" ? "mp4" : (extFromUrl(m.url) ?? "jpg");
-  const localPath = `media/${safeUser}/${b.id}_${m.index}.${ext}`;
+  const localPath = mediaPath(safeUser, b.id, m.index, ext);
 
   if (missing) {
     return (
