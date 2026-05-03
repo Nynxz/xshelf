@@ -6,4 +6,5 @@ node_modules
 dist
 build
 src/snapshot/dist
+src/master/dist
 public

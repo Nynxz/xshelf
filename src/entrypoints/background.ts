@@ -7,6 +7,9 @@ import { SW_VERSION } from "../lib/messaging";
 // because WXT was reprocessing public/*.html as additional entries, which
 // undid the singlefile inlining.
 import snapshotTemplate from "../snapshot/dist/index.html?raw";
+// Master-explorer template: a sidebar over BookmarkExplorer that aggregates
+// every known source. Same `?raw` mechanism as the per-source snapshot.
+import masterTemplate from "../master/dist/index.html?raw";
 import type {
   Bookmark,
   Captured,
@@ -639,6 +642,8 @@ export default defineBackground({
         // alongside their media files. Done after sync (even before the user
         // accepts the download phase) so the index reflects current manifest state.
         await writeSnapshot(options.folder, manifest);
+        await writeSourceDataJs(options.folder, manifest);
+        await writeMasterIndex(options.folder);
 
         // Per-crawl manifest for user-archive sources — the unit of comparison
         // when two users want to diff their archives of the same handle.
@@ -736,8 +741,11 @@ export default defineBackground({
         recomputeSummary();
         await savePending(pendingMedia);
         await saveManifest(manifest);
-        // Re-write the snapshot now that media `downloaded` flags are flipped.
+        // Re-write the snapshot + per-source data + master index now that media
+        // `downloaded` flags are flipped.
         await writeSnapshot(folder, manifest);
+        await writeSourceDataJs(folder, manifest);
+        await writeMasterIndex(folder);
 
         runtime.totalKnown = Object.keys(manifest.bookmarks).length;
         runtime.finishedAt = new Date().toISOString();
@@ -809,6 +817,74 @@ export default defineBackground({
         appendLog(`Crawl manifest: ${ids.length} tweets, sha256=${contentHash.slice(0, 12)}…`);
       } catch (e) {
         appendLog(`Crawl manifest write failed: ${(e as Error).message}`);
+      }
+    }
+
+    /**
+     * Per-source `data.js`: an IIFE that registers this source's payload with
+     * `window.xshelf` so the master xshelf/index.html can pick it up via a
+     * `<script src>` tag. Same shape as the inline JSON in per-source
+     * explorer.html, just delivered via JS rather than JSON-in-HTML so we can
+     * use it cross-document (file:// can't fetch).
+     */
+    async function writeSourceDataJs(folder: string, manifest: Manifest): Promise<void> {
+      try {
+        const sourcePath = sourceDiskPath(manifest.source);
+        const sortedBookmarks = Object.values(manifest.bookmarks).sort((a, b) => {
+          const ta = a.lastSeenAt ? Date.parse(a.lastSeenAt) || 0 : 0;
+          const tb = b.lastSeenAt ? Date.parse(b.lastSeenAt) || 0 : 0;
+          if (tb !== ta) return tb - ta;
+          return (a.lastSeenIndex ?? 1e9) - (b.lastSeenIndex ?? 1e9);
+        });
+        const payload = {
+          source: manifest.source,
+          exportedAt: new Date().toISOString(),
+          count: sortedBookmarks.length,
+          lastRun: manifest.lastRun,
+          bookmarks: sortedBookmarks,
+        };
+        const sourceJson = JSON.stringify(manifest.source);
+        const payloadJson = JSON.stringify(payload);
+        const js =
+          `(function(){var w=window;` +
+          `if(!w.xshelf)w.xshelf={sources:{},sourceList:[]};` +
+          `w.xshelf.sources[${sourceJson}]=${payloadJson};` +
+          `if(w.xshelf.sourceList.indexOf(${sourceJson})<0)w.xshelf.sourceList.push(${sourceJson});` +
+          `})();`;
+        const dataUrl =
+          "data:application/javascript;charset=utf-8," + encodeURIComponent(js);
+        await downloadFile(dataUrl, `${folder}/${sourcePath}/data.js`, "overwrite");
+      } catch (e) {
+        appendLog(`data.js write failed: ${(e as Error).message}`);
+      }
+    }
+
+    /**
+     * Master xshelf/index.html: a singlefile Preact bundle from
+     * vite.master.config.ts with `<script src>` tags injected for every known
+     * source's data.js. Rewritten on every sync so newly-added sources
+     * appear automatically.
+     *
+     * The injection point is between two HTML comment sentinels in the
+     * built template:
+     *   <!-- xshelf-source-scripts-start --><!-- xshelf-source-scripts-end -->
+     */
+    async function writeMasterIndex(folder: string): Promise<void> {
+      try {
+        const sources = await listSources();
+        if (!sources.length) return; // nothing to aggregate yet
+        const tags = sources
+          .map((s) => `<script src="${sourceDiskPath(s)}/data.js"></script>`)
+          .join("\n    ");
+        const html = masterTemplate.replace(
+          /<!--\s*xshelf-source-scripts-start\s*-->[\s\S]*?<!--\s*xshelf-source-scripts-end\s*-->/,
+          `<!-- xshelf-source-scripts-start -->\n    ${tags}\n    <!-- xshelf-source-scripts-end -->`,
+        );
+        const dataUrl = "data:text/html;charset=utf-8," + encodeURIComponent(html);
+        await downloadFile(dataUrl, `${folder}/index.html`, "overwrite");
+        appendLog(`Master index regenerated (${sources.length} source${sources.length === 1 ? "" : "s"}).`);
+      } catch (e) {
+        appendLog(`Master index write failed: ${(e as Error).message}`);
       }
     }
 
