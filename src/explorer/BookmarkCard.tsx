@@ -63,9 +63,14 @@ function MediaItem({
   const localPath = `media/${safeUser}/${bookmark.id}_${media.index}.${ext}`;
   const [missing, setMissing] = useState(false);
 
-  // Strictly offline: never fall back to pbs.twimg.com / video.twimg.com URLs.
+  // Strictly offline: never auto-fetch from pbs.twimg.com / video.twimg.com.
+  // The tweet URL is just a click-through hyperlink, not an automatic request.
   if (missing) {
-    return <div class="missing">{media.kind === "video" ? "Video" : "Image"} not available offline</div>;
+    return (
+      <a class="missing" href={bookmark.url} target="_blank" rel="noopener">
+        {media.kind === "video" ? "Video" : "Image"} not on disk — open tweet
+      </a>
+    );
   }
 
   if (media.kind === "video") {

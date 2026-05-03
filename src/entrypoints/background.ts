@@ -45,7 +45,7 @@ import {
 import {
   cancelAllDownloads,
   downloadFile,
-  existsByUrl,
+  existsAtPath,
   mapLimited,
 } from "../lib/downloads";
 import {
@@ -222,6 +222,26 @@ export default defineBackground({
 
     // === RUN: SYNC PHASE ===
     /**
+     * Compute the relative on-disk path a media item will be (or was) written to.
+     * Single source of truth shared by audit, pre-flight, and runDownload, so
+     * "where will this file live" is consistent across phases.
+     */
+    function expectedMediaPath(
+      folder: string,
+      source: SourceKey,
+      tweetId: string,
+      username: string,
+      mediaIndex: number,
+      kind: PendingMediaItem["kind"],
+      url: string,
+    ): string {
+      const sourcePath = sourceDiskPath(source);
+      const safeUser = sanitizeUsername(username);
+      const ext = kind === "video" ? "mp4" : extFromUrl(url) ?? "jpg";
+      return `${folder}/${sourcePath}/media/${safeUser}/${tweetId}_${mediaIndex}.${ext}`;
+    }
+
+    /**
      * Per-source plug-in for the run loop. The bookmarks and user-archive
      * flows share the same pagination, audit, pre-flight, and download
      * machinery — they only differ in *which* GraphQL endpoint they hit and
@@ -374,7 +394,7 @@ export default defineBackground({
         if (options.incremental && runtime.totalKnown > 0) {
           runtime.currentPhase = "audit";
           await persist();
-          const reconciled = await auditAgainstChromeDownloads(manifest);
+          const reconciled = await auditAgainstChromeDownloads(manifest, options.folder);
           if (reconciled > 0) {
             appendLog(
               `Audit reconciled ${reconciled} files (already on disk; won't re-download).`,
@@ -505,7 +525,19 @@ export default defineBackground({
           const results = await mapLimited(
             pendingMedia,
             4,
-            (p) => (cancelFlag ? Promise.resolve(false) : existsByUrl(p.url)),
+            (p) => {
+              if (cancelFlag) return Promise.resolve(false);
+              const expected = expectedMediaPath(
+                options.folder,
+                source,
+                p.tweetId,
+                p.username,
+                p.mediaIndex,
+                p.kind,
+                p.url,
+              );
+              return existsAtPath(p.url, expected);
+            },
             (done, total) => {
               appendLog(`Pre-flight progress: ${done}/${total}`);
               persist();
@@ -758,13 +790,35 @@ export default defineBackground({
       }
     }
 
-    async function auditAgainstChromeDownloads(manifest: Manifest): Promise<number> {
-      const pending: Array<{ tweetId: string; mediaIndex: number; url: string }> = [];
+    async function auditAgainstChromeDownloads(
+      manifest: Manifest,
+      folder: string,
+    ): Promise<number> {
+      type AuditItem = {
+        tweetId: string;
+        mediaIndex: number;
+        url: string;
+        expectedPath: string;
+      };
+      const pending: AuditItem[] = [];
       for (const id of Object.keys(manifest.bookmarks)) {
         const t = manifest.bookmarks[id];
         for (const m of t.media ?? []) {
           if (!m.downloaded && m.url) {
-            pending.push({ tweetId: id, mediaIndex: m.index, url: m.url });
+            pending.push({
+              tweetId: id,
+              mediaIndex: m.index,
+              url: m.url,
+              expectedPath: expectedMediaPath(
+                folder,
+                manifest.source,
+                t.id,
+                t.username,
+                m.index,
+                m.kind,
+                m.url,
+              ),
+            });
           }
         }
       }
@@ -775,7 +829,7 @@ export default defineBackground({
       const results = await mapLimited(
         pending,
         4,
-        (p) => (cancelFlag ? Promise.resolve(false) : existsByUrl(p.url)),
+        (p) => (cancelFlag ? Promise.resolve(false) : existsAtPath(p.url, p.expectedPath)),
         (done, total) => {
           appendLog(`Audit progress: ${done}/${total}`);
           persist();

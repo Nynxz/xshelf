@@ -25,7 +25,7 @@ export type ResponseFor<T extends RequestMessage["type"]> =
 export type BroadcastMessage =
   | { type: "stateUpdate"; state: RuntimeState };
 
-export const SW_VERSION = "v18-usermedia-autodetect";
+export const SW_VERSION = "v19-path-aware-preflight";
 
 export function send<T extends RequestMessage>(
   msg: T,

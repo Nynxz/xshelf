@@ -276,7 +276,9 @@ main {
   font-size: 12px;
   text-align: center;
   padding: 8px;
+  text-decoration: none;
 }
+a.missing:hover { color: var(--accent); }
 
 button.load-more {
   display: block;

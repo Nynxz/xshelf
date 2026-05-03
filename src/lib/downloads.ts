@@ -100,6 +100,34 @@ export async function existsByUrl(url: string): Promise<boolean> {
 }
 
 /**
+ * Stronger version of existsByUrl: not only does the URL appear in download
+ * history, but at least one of the recorded downloads landed at a path whose
+ * relative tail matches `expectedRelative`. This is what pre-flight and audit
+ * need so that downloading the same URL into a different source's folder
+ * doesn't get falsely skipped.
+ *
+ * Example: bookmark of an @elonmusk tweet was downloaded to
+ *   ~/Downloads/xshelf/bookmarks/media/elonmusk/123_0.jpg
+ * Now an @elonmusk user-archive sync expects the same image at
+ *   ~/Downloads/xshelf/users/elonmusk/media/elonmusk/123_0.jpg
+ * Same URL, different path. existsByUrl would say "yes, downloaded" — wrong.
+ * existsAtPath verifies the path tail matches.
+ */
+export async function existsAtPath(url: string, expectedRelative: string): Promise<boolean> {
+  try {
+    const items = await chrome.downloads.search({ url, state: "complete", limit: 10 });
+    if (!items || !items.length) return false;
+    const target = expectedRelative.replace(/\\/g, "/");
+    return items.some((item) => {
+      const actual = (item.filename || "").replace(/\\/g, "/");
+      return actual.endsWith(target);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Bounded-concurrency map. Critical for chrome.downloads.search calls — without
  * this, audit/pre-flight saturated Chrome's download manager and froze the browser.
  */
