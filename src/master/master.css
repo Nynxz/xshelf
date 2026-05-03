@@ -19,20 +19,15 @@
 }
 
 /* The stand-alone explorer caps header/grid width at 1280px and centers them
- * on the page. In master view the sidebar already takes one side, so an
- * additional cap leaves a fat empty column when the sidebar collapses
- * instead of expanding the grid. Let those fill the main-pane instead.
- * (List view keeps its own ~700px reading cap — wide text lines hurt.) */
+ * on the page. In master view the sidebar already balances the page; that
+ * extra cap leaves a fat empty column when the sidebar collapses instead of
+ * adding grid columns. Drop the cap on the grid and the header in master
+ * mode. (List view stays centered with its 700px reading cap — wide text
+ * lines hurt readability.) */
 .master-layout .main-pane > header .header-inner,
 .master-layout .main-pane > main.view-grid {
   max-width: none;
   margin: 0;
-}
-.master-layout .main-pane > main:not(.view-grid) {
-  /* Keep the readability cap, but anchor to the left of the main-pane so
-   * collapsing the sidebar doesn't shift the cards to a new center. */
-  margin-left: 0;
-  margin-right: auto;
 }
 
 .sidebar-toggle {
