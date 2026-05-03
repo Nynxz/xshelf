@@ -46,30 +46,44 @@ export function App() {
     return () => { cancelled = true; };
   }, []);
 
-  // Find the most recent on-disk explorer.html snapshot and open it. Uses
-  // chrome.downloads.open which respects the user's click as a "gesture" and
+  // Open the master xshelf/index.html (the cross-source explorer with sidebar).
+  // Falls back to the most recent per-source explorer.html if no master exists
+  // yet (e.g. running an older version of the extension that didn't write masters).
+  // chrome.downloads.open inherits the popup-button click as a user gesture and
   // launches the file in the default app (the browser, for HTML).
   async function openSnapshot() {
     try {
-      const items = await chrome.downloads.search({
-        filenameRegex: ".*explorer\\.html$",
+      // Prefer the master: any *.html named "index.html" we wrote to Downloads.
+      // Other index.html files (e.g. random downloads) won't appear because
+      // chrome.downloads.search only sees this extension's own downloads.
+      let items = await chrome.downloads.search({
+        filenameRegex: ".*[\\\\/]index\\.html$",
         state: "complete",
         limit: 1,
         orderBy: ["-startTime"],
       });
       if (items.length === 0) {
-        alert("No snapshot yet — run a sync first.");
+        // Fallback: a per-source snapshot.
+        items = await chrome.downloads.search({
+          filenameRegex: ".*explorer\\.html$",
+          state: "complete",
+          limit: 1,
+          orderBy: ["-startTime"],
+        });
+      }
+      if (items.length === 0) {
+        alert("No explorer yet — run a sync first.");
         return;
       }
       try {
         chrome.downloads.open(items[0].id);
       } catch {
-        // chrome.downloads.open requires a user gesture and may fail; fall back
-        // to revealing the file in the system file manager.
+        // open() requires a user gesture and may fail; fall back to revealing
+        // the file in the system file manager.
         chrome.downloads.show(items[0].id);
       }
     } catch (e) {
-      alert("Couldn't open snapshot: " + ((e as Error).message ?? String(e)));
+      alert("Couldn't open explorer: " + ((e as Error).message ?? String(e)));
     }
   }
 
@@ -220,10 +234,11 @@ export function App() {
         with your manifest. Click <em>Download</em> to fetch new media or <em>Discard</em> to skip.
         The run lives in the service worker — close and reopen this popup any time.
         <br /><br />
-        After each sync, a self-contained <code>{(folder || "xshelf") + "/bookmarks/explorer.html"}</code> is written
-        to your Downloads folder. Open that file from your file manager for full media browsing.
-        The "Open explorer" button below opens the live in-browser version (faster, but local
-        videos won't play there).
+        After each sync, a master <code>{(folder || "xshelf") + "/index.html"}</code> is written
+        to your Downloads folder, aggregating every source you've synced (bookmarks +
+        each archived user) with a sidebar. Per-source <code>explorer.html</code> files are
+        also written under <code>bookmarks/</code> and <code>users/&lt;handle&gt;/</code> for
+        sharing single archives. The "Open explorer" button opens the master.
         <br /><br />
         Open <a href="#" onClick={(e) => { e.preventDefault(); chrome.tabs.create({ url: "https://x.com/i/bookmarks" }); }}>x.com/i/bookmarks</a>
         {" "}first so the extension can capture your session.
