@@ -10,6 +10,7 @@ import snapshotTemplate from "../snapshot/dist/index.html?raw";
 import type {
   Bookmark,
   Captured,
+  CrawlManifest,
   Manifest,
   PendingMediaItem,
   PendingSummary,
@@ -48,6 +49,7 @@ import {
   mapLimited,
 } from "../lib/downloads";
 import {
+  computeContentHash,
   extractUserTweetsEntries,
   fetchUserByScreenName,
   fetchUserTweetsPage,
@@ -521,8 +523,9 @@ export default defineBackground({
         recomputeSummary();
         await savePending(pendingMedia);
 
+        const finishedAtIso = new Date().toISOString();
         manifest.lastRun = {
-          finishedAt: new Date().toISOString(),
+          finishedAt: finishedAtIso,
           pages: runtime.pageCount,
           seen: runtime.totalSeen,
           newCount: runtime.newCount,
@@ -535,6 +538,12 @@ export default defineBackground({
         // alongside their media files. Done after sync (even before the user
         // accepts the download phase) so the index reflects current manifest state.
         await writeSnapshot(options.folder, manifest);
+
+        // Per-crawl manifest for user-archive sources — the unit of comparison
+        // when two users want to diff their archives of the same handle.
+        if (isUserSource(source)) {
+          await writeCrawlManifest(options.folder, manifest, finishedAtIso, stoppedEarly);
+        }
 
         runtime.totalKnown = Object.keys(manifest.bookmarks).length;
         runtime.finishedAt = new Date().toISOString();
@@ -656,6 +665,49 @@ export default defineBackground({
      * sits next to the media folder, so relative `media/<user>/<id>.jpg` paths
      * resolve from `file://` and the user gets full media playback offline.
      */
+    /**
+     * Write a per-crawl manifest for a user-archive source. Lives at
+     *   <folder>/users/<handle>/crawls/<iso>.json
+     * with a sha256 over sorted tweet ids so two archives of the same handle
+     * can be compared cheaply (same hash → identical contents; different hash
+     * → diff the id sets to find what one has that the other doesn't).
+     */
+    async function writeCrawlManifest(
+      folder: string,
+      manifest: Manifest,
+      finishedAtIso: string,
+      stoppedEarly: boolean,
+    ): Promise<void> {
+      const handle = sourceUsername(manifest.source);
+      if (!handle) return;
+      try {
+        const ids = Object.keys(manifest.bookmarks);
+        const sortedIds = [...ids].sort();
+        const contentHash = await computeContentHash(sortedIds);
+        const crawl: CrawlManifest = {
+          version: 1,
+          source: manifest.source,
+          username: handle,
+          crawledAt: finishedAtIso,
+          tweetCount: ids.length,
+          tweetIdMin: sortedIds[0] ?? null,
+          tweetIdMax: sortedIds[sortedIds.length - 1] ?? null,
+          contentHash,
+          pages: runtime.pageCount,
+          stoppedEarly,
+        };
+        // Filename-safe ISO (drop colons + decimal seconds → 2026-05-03T12-00-00Z)
+        const fnameStamp = finishedAtIso.replace(/[:.]/g, "-").replace(/-\d+Z$/, "Z");
+        const json = JSON.stringify(crawl, null, 2);
+        const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+        const path = `${folder}/users/${handle}/crawls/${fnameStamp}.json`;
+        await downloadFile(dataUrl, path, "overwrite");
+        appendLog(`Crawl manifest: ${ids.length} tweets, sha256=${contentHash.slice(0, 12)}…`);
+      } catch (e) {
+        appendLog(`Crawl manifest write failed: ${(e as Error).message}`);
+      }
+    }
+
     async function writeSnapshot(folder: string, manifest: Manifest): Promise<void> {
       try {
         const sourcePath = sourceDiskPath(manifest.source);

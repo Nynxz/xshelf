@@ -172,6 +172,25 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
  * Heuristic: a retweet has `legacy.retweeted_status_result` (or
  * `legacy.retweeted_status`) set on the tweet object. Original posts don't.
  */
+/**
+ * SHA-256 of the newline-joined, lexicographically-sorted tweet IDs.
+ * Two archives that contain exactly the same tweets produce the same hash;
+ * if they differ, the difference is precisely the symmetric difference of
+ * their id-sets — which the diff UI (phase 3) can show.
+ */
+export async function computeContentHash(tweetIds: string[]): Promise<string> {
+  const sorted = [...tweetIds].sort();
+  const text = sorted.join("\n");
+  const buf = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  const bytes = new Uint8Array(digest);
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
 export function isRetweet(entry: unknown): boolean {
   try {
     const e = entry as { content?: any };

@@ -78,6 +78,25 @@ export interface LastRun {
   phase: "sync" | "download";
 }
 
+/**
+ * Per-crawl manifest written for user-archive sources only. Lives at
+ * `<folder>/users/<handle>/crawls/<iso>.json` and is the unit of comparison
+ * between two users who've each archived the same handle.
+ */
+export interface CrawlManifest {
+  version: 1;
+  source: SourceKey;
+  username: string;
+  crawledAt: string;          // ISO of when this run finished
+  tweetCount: number;
+  tweetIdMin: string | null;  // numeric strings, but compared lexicographically since they're sortable as such
+  tweetIdMax: string | null;
+  /** sha256 hex over `\n`-joined sorted tweet ids — `<min>` ≤ `<max>` */
+  contentHash: string;
+  pages: number;
+  stoppedEarly: boolean;
+}
+
 export interface PendingMediaItem {
   tweetId: string;
   username: string;
