@@ -149,6 +149,12 @@ export function fetchUserMediaPage(args: FetchUserTweetsArgs): Promise<unknown> 
 export interface ExtractedUserPage {
   entries: unknown[];
   nextCursor: string | null;
+  /**
+   * Set when X's bottom cursor entry carries `stopOnEmptyResponse: true`,
+   * meaning "if you got nothing on this page, stop following the cursor."
+   * Without this, X will happily hand out pagination cursors forever.
+   */
+  stopOnEmptyResponse?: boolean;
   /** Diagnostic counts for the run-log: helps tell extractor bugs from parser bugs. */
   raw?: { items: number; modules: number; cursors: number; other: number };
 }
@@ -181,6 +187,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
 
   const flat: unknown[] = [];
   let nextCursor: string | null = null;
+  let stopOnEmptyResponse = false;
   const raw = { items: 0, modules: 0, cursors: 0, other: 0 };
 
   type AnyEntry = {
@@ -188,6 +195,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
       entryType?: string;
       cursorType?: string;
       value?: string;
+      stopOnEmptyResponse?: boolean;
       itemContent?: unknown;
       items?: Array<{ item?: { itemContent?: unknown } }>;
     };
@@ -202,7 +210,10 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
     }
     if (c.entryType === "TimelineTimelineCursor") {
       raw.cursors++;
-      if (c.cursorType === "Bottom" && c.value) nextCursor = c.value;
+      if (c.cursorType === "Bottom" && c.value) {
+        nextCursor = c.value;
+        if (c.stopOnEmptyResponse) stopOnEmptyResponse = true;
+      }
       return;
     }
     if (c.entryType === "TimelineTimelineItem") {
@@ -232,7 +243,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
     }
   }
 
-  return { entries: flat, nextCursor, raw };
+  return { entries: flat, nextCursor, raw, stopOnEmptyResponse };
 }
 
 /**

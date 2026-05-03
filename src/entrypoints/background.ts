@@ -257,6 +257,8 @@ export default defineBackground({
       extractEntries(json: unknown): {
         entries: unknown[];
         nextCursor: string | null;
+        /** True when X's cursor signals "stop if you got nothing". */
+        stopOnEmptyResponse?: boolean;
         /** Optional per-shape counts for diagnostic logging. */
         raw?: { items: number; modules: number; cursors: number; other: number };
       };
@@ -423,6 +425,10 @@ export default defineBackground({
         let stoppedEarly = false;
         const earlyStopAfter = options.earlyStopAfter ?? 30;
         let syncEncounterIndex = 0;
+        // Pages that returned no item-bearing content. UserMedia / UserTweets
+        // can hand back cursor-only pages forever after the real content ends;
+        // we treat 2 in a row as "X is out of content" and bail.
+        let consecutiveEmptyPages = 0;
 
         while (runtime.pageCount < options.maxPages) {
           if (cancelFlag) break;
@@ -442,11 +448,29 @@ export default defineBackground({
             }
             throw e;
           }
-          const { entries, nextCursor, raw } = ctx.extractEntries(json);
+          const { entries, nextCursor, raw, stopOnEmptyResponse } = ctx.extractEntries(json);
           if (raw) {
             appendLog(
               `Page ${runtime.pageCount} raw: ${raw.items} items, ${raw.modules} modules, ${raw.cursors} cursors, ${raw.other} other → ${entries.length} parsable`,
             );
+          }
+          // Bail if X is feeding us cursor-only pages. Two signals trigger this:
+          // (a) the cursor explicitly says stopOnEmptyResponse, or
+          // (b) we just got our 2nd-in-a-row content-free page (defense in depth).
+          if (entries.length === 0) {
+            consecutiveEmptyPages++;
+            if (stopOnEmptyResponse) {
+              appendLog("Cursor signals stopOnEmptyResponse — end of timeline.");
+              break;
+            }
+            if (consecutiveEmptyPages >= 2) {
+              appendLog(
+                `${consecutiveEmptyPages} consecutive empty pages — assuming end of timeline.`,
+              );
+              break;
+            }
+          } else {
+            consecutiveEmptyPages = 0;
           }
           let newOnPage = 0;
 
