@@ -152,31 +152,69 @@ export interface ExtractedUserPage {
 }
 
 export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
-  // Defensively walk the shape: data.user.result.timeline.timeline.instructions[]
-  const j = json as { data?: { user?: { result?: { timeline?: { timeline?: { instructions?: unknown[] } } } } } };
-  const instructions = j?.data?.user?.result?.timeline?.timeline?.instructions ?? [];
-  let entries: unknown[] = [];
-  for (const ins of instructions as Array<{ type?: string; entries?: unknown[]; entry?: unknown }>) {
-    if (ins.type === "TimelineAddEntries" && Array.isArray(ins.entries)) {
-      entries = entries.concat(ins.entries);
-    } else if (ins.type === "TimelinePinEntry" && ins.entry) {
-      // Pinned tweet — include it but downstream filtering will treat it normally.
-      entries.push(ins.entry);
-    }
-  }
+  // Walks `data.user.result.timeline.timeline.instructions[]` (or the legacy
+  // singular `timeline.instructions` form some endpoints still use) and returns
+  // a flattened list of *tweet-shaped entries*. Module-wrapped tweets (the
+  // /<user>/media grid uses TimelineTimelineModule with items[] arrays) are
+  // unwrapped into synthetic TimelineTimelineItem entries so parseTweetEntry
+  // (which reads content.itemContent) handles both layouts uniformly.
+  const j = json as {
+    data?: {
+      user?: {
+        result?: {
+          timeline?: { timeline?: { instructions?: unknown[] }; instructions?: unknown[] };
+        };
+      };
+    };
+  };
+  const root = j?.data?.user?.result?.timeline;
+  const instructions = root?.timeline?.instructions ?? root?.instructions ?? [];
+
+  const flat: unknown[] = [];
   let nextCursor: string | null = null;
-  for (const e of entries as Array<{ content?: { entryType?: string; cursorType?: string; value?: string } }>) {
-    const c = e?.content;
-    if (c?.entryType === "TimelineTimelineCursor" && c?.cursorType === "Bottom") {
-      nextCursor = c.value ?? null;
+
+  type AnyEntry = {
+    content?: {
+      entryType?: string;
+      cursorType?: string;
+      value?: string;
+      itemContent?: unknown;
+      items?: Array<{ item?: { itemContent?: unknown } }>;
+    };
+    entryId?: string;
+  };
+
+  function consume(entry: AnyEntry): void {
+    const c = entry?.content;
+    if (!c) return;
+    if (c.entryType === "TimelineTimelineCursor") {
+      if (c.cursorType === "Bottom" && c.value) nextCursor = c.value;
+      return;
+    }
+    if (c.entryType === "TimelineTimelineItem") {
+      flat.push(entry);
+      return;
+    }
+    if (c.entryType === "TimelineTimelineModule" && Array.isArray(c.items)) {
+      for (const mi of c.items) {
+        const itemContent = mi?.item?.itemContent;
+        if (!itemContent) continue;
+        // Re-wrap as a TimelineTimelineItem-shaped entry. parseTweetEntry only
+        // looks at content.itemContent, so this is enough.
+        flat.push({ content: { entryType: "TimelineTimelineItem", itemContent } });
+      }
     }
   }
-  // Filter to tweet-bearing entries (skip cursors, modules with conversation we don't expand).
-  const tweetEntries = (entries as Array<{ content?: { entryType?: string; itemContent?: any; items?: any[] } }>).filter((e) => {
-    const c = e?.content;
-    return c?.entryType === "TimelineTimelineItem" || c?.entryType === "TimelineTimelineModule";
-  });
-  return { entries: tweetEntries, nextCursor };
+
+  for (const ins of instructions as Array<{ type?: string; entries?: AnyEntry[]; entry?: AnyEntry }>) {
+    if (ins.type === "TimelineAddEntries" && Array.isArray(ins.entries)) {
+      for (const e of ins.entries) consume(e);
+    } else if (ins.type === "TimelinePinEntry" && ins.entry) {
+      consume(ins.entry);
+    }
+  }
+
+  return { entries: flat, nextCursor };
 }
 
 /**
