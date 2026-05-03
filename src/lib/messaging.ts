@@ -25,7 +25,7 @@ export type ResponseFor<T extends RequestMessage["type"]> =
 export type BroadcastMessage =
   | { type: "stateUpdate"; state: RuntimeState };
 
-export const SW_VERSION = "v15-multisource-1a";
+export const SW_VERSION = "v16-user-archive";
 
 export function send<T extends RequestMessage>(
   msg: T,

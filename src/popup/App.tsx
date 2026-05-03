@@ -1,6 +1,9 @@
 import { useEffect, useState } from "preact/hooks";
 import { send, SW_VERSION } from "../lib/messaging";
-import type { Manifest, RuntimeState, CapturedSummary } from "../lib/types";
+import type { Manifest, RuntimeState, CapturedSummary, SourceKey } from "../lib/types";
+import { userSource } from "../lib/types";
+
+type SourceMode = "bookmarks" | "user";
 
 export function App() {
   const [state, setState] = useState<RuntimeState | null>(null);
@@ -10,6 +13,8 @@ export function App() {
   const [folder, setFolder] = useState("xshelf");
   const [maxPages, setMaxPages] = useState(200);
   const [incremental, setIncremental] = useState(true);
+  const [sourceMode, setSourceMode] = useState<SourceMode>("bookmarks");
+  const [userHandle, setUserHandle] = useState("");
 
   // Find the most recent on-disk explorer.html snapshot and open it. Uses
   // chrome.downloads.open which respects the user's click as a "gesture" and
@@ -69,6 +74,21 @@ export function App() {
   const status = state?.status ?? "idle";
   const versionMismatch = version != null && version !== SW_VERSION;
 
+  function buildSource(): SourceKey | null {
+    if (sourceMode === "bookmarks") return "bookmarks";
+    const h = userHandle.trim().replace(/^@/, "");
+    if (!/^[a-zA-Z0-9_]{1,15}$/.test(h)) return null;
+    return userSource(h);
+  }
+
+  const computedSource = buildSource();
+  const canStartSync =
+    !!computedSource &&
+    !!captured?.hasAuth &&
+    (sourceMode === "bookmarks"
+      ? !!captured.hasBookmarks
+      : !!captured.hasUserByScreenName && !!captured.hasUserTweets);
+
   return (
     <>
       <h1>X Bookmark Downloader</h1>
@@ -82,6 +102,11 @@ export function App() {
 
       <CaptureLine captured={captured} />
 
+      <SourcePicker
+        mode={sourceMode} setMode={setSourceMode}
+        handle={userHandle} setHandle={setUserHandle}
+        disabled={status === "syncing" || status === "downloading" || status === "cancelling"}
+      />
       <RunOptions
         folder={folder} setFolder={setFolder}
         maxPages={maxPages} setMaxPages={setMaxPages}
@@ -98,7 +123,17 @@ export function App() {
 
       <ActionBar
         status={status}
-        onStartSync={() => send({ type: "startSync", options: { source: "bookmarks", folder, maxPages, incremental } })}
+        onStartSync={() => {
+          if (!computedSource) {
+            alert("Enter a valid @handle (1–15 letters/digits/underscores).");
+            return;
+          }
+          return send({
+            type: "startSync",
+            options: { source: computedSource, folder, maxPages, incremental },
+          });
+        }}
+        canStartSync={canStartSync}
         onStartDownload={() => send({ type: "startDownload" })}
         onCancel={() => send({ type: "cancelBackup" })}
         onDiscard={async () => {
@@ -194,6 +229,44 @@ function RunOptions({
   );
 }
 
+function SourcePicker({
+  mode, setMode, handle, setHandle, disabled,
+}: {
+  mode: SourceMode;
+  setMode: (m: SourceMode) => void;
+  handle: string;
+  setHandle: (h: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <>
+      <div class="row">
+        <label for="source-mode">Source</label>
+        <select
+          id="source-mode" value={mode}
+          onChange={(e) => setMode((e.target as HTMLSelectElement).value as SourceMode)}
+          disabled={disabled}
+        >
+          <option value="bookmarks">My bookmarks</option>
+          <option value="user">Archive a user</option>
+        </select>
+      </div>
+      {mode === "user" && (
+        <div class="row">
+          <label for="user-handle">@handle (no leading @)</label>
+          <input
+            id="user-handle" type="text" placeholder="elonmusk" value={handle}
+            onInput={(e) => setHandle((e.target as HTMLInputElement).value)}
+            disabled={disabled}
+            spellcheck={false}
+            autocapitalize="off"
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 function ManifestStats({ manifest }: { manifest: Manifest | null }) {
   if (!manifest || Object.keys(manifest.bookmarks).length === 0) {
     return <div class="status">History: empty.</div>;
@@ -255,6 +328,7 @@ function ReviewPanel({ summary }: { summary: RuntimeState["pendingSummary"] }) {
 function ActionBar(props: {
   status: RuntimeState["status"];
   onStartSync: () => void;
+  canStartSync?: boolean;
   onStartDownload: () => void;
   onCancel: () => void;
   onDiscard: () => void;
@@ -264,9 +338,19 @@ function ActionBar(props: {
 }) {
   const busy = props.status === "syncing" || props.status === "downloading" || props.status === "cancelling";
   const ready = props.status === "ready";
+  const canStart = props.canStartSync !== false;
   return (
     <div class="actions">
-      {!ready && <button class="primary" disabled={busy} onClick={props.onStartSync}>Start sync</button>}
+      {!ready && (
+        <button
+          class="primary"
+          disabled={busy || !canStart}
+          title={canStart ? undefined : "Capture missing or invalid handle — see status above"}
+          onClick={props.onStartSync}
+        >
+          Start sync
+        </button>
+      )}
       {ready && <button class="primary" onClick={props.onStartDownload}>Download all</button>}
       {ready && <button onClick={props.onDiscard}>Discard pending</button>}
       <button disabled={!busy} onClick={props.onCancel}>Cancel</button>

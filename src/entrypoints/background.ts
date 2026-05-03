@@ -17,7 +17,7 @@ import type {
   SourceKey,
   SyncOptions,
 } from "../lib/types";
-import { CAPTURED_OP_NAMES, sourceDiskPath } from "../lib/types";
+import { CAPTURED_OP_NAMES, isUserSource, sourceDiskPath, sourceUsername } from "../lib/types";
 import {
   clearManifest,
   clearPending,
@@ -47,6 +47,12 @@ import {
   existsByUrl,
   mapLimited,
 } from "../lib/downloads";
+import {
+  extractUserTweetsEntries,
+  fetchUserByScreenName,
+  fetchUserTweetsPage,
+  isRetweet,
+} from "../lib/users";
 
 export default defineBackground({
   type: "module",
@@ -212,9 +218,81 @@ export default defineBackground({
     );
 
     // === RUN: SYNC PHASE ===
+    /**
+     * Per-source plug-in for the run loop. The bookmarks and user-archive
+     * flows share the same pagination, audit, pre-flight, and download
+     * machinery — they only differ in *which* GraphQL endpoint they hit and
+     * which entries they accept.
+     */
+    interface SourceContext {
+      source: SourceKey;
+      description: string; // for log lines
+      fetchPage(cursor: string | null): Promise<unknown>;
+      extractEntries(json: unknown): { entries: unknown[]; nextCursor: string | null };
+      acceptEntry(entry: unknown): boolean;
+    }
+
+    async function createSourceContext(source: SourceKey): Promise<SourceContext> {
+      if (source === "bookmarks") {
+        const ep = captured.endpoints.Bookmarks;
+        if (!ep) {
+          throw new Error(
+            "No Bookmarks endpoint captured yet. Open https://x.com/i/bookmarks and scroll once.",
+          );
+        }
+        return {
+          source: "bookmarks",
+          description: `Bookmarks (queryId=${ep.queryId})`,
+          fetchPage: (cursor) =>
+            fetchBookmarksPage({
+              host: "x.com",
+              queryId: ep.queryId,
+              operation: "Bookmarks",
+              cursor,
+              captured,
+            }),
+          extractEntries,
+          acceptEntry: () => true, // user explicitly bookmarked it; trust intent
+        };
+      }
+      if (isUserSource(source)) {
+        const handle = sourceUsername(source);
+        if (!handle) throw new Error(`Bad user source: ${source}`);
+        const userByScreenName = captured.endpoints.UserByScreenName;
+        const userTweets = captured.endpoints.UserTweets;
+        if (!userByScreenName || !userTweets) {
+          const missing: string[] = [];
+          if (!userByScreenName) missing.push("UserByScreenName");
+          if (!userTweets) missing.push("UserTweets");
+          throw new Error(
+            `Missing endpoint${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}. ` +
+              `Visit any X profile (e.g. https://x.com/${handle}) and scroll once so the extension can capture the request.`,
+          );
+        }
+        appendLog(`Resolving @${handle}…`);
+        await persist();
+        const user = await fetchUserByScreenName(handle, userByScreenName.queryId, captured);
+        appendLog(`@${handle} → user_id ${user.rest_id}`);
+        const userId = user.rest_id;
+        return {
+          source,
+          description: `UserTweets for @${handle} (rest_id=${userId}, queryId=${userTweets.queryId})`,
+          fetchPage: (cursor) =>
+            fetchUserTweetsPage({
+              userId,
+              queryId: userTweets.queryId,
+              cursor,
+              captured,
+            }),
+          extractEntries: extractUserTweetsEntries,
+          acceptEntry: (entry) => !isRetweet(entry), // archive originals only
+        };
+      }
+      throw new Error(`Unknown source: ${source}`);
+    }
+
     async function runSync(options: SyncOptions): Promise<void> {
-      // Phase 0: only bookmarks source. Phase 1 will parameterize this on the run.
-      const source: SourceKey = "bookmarks";
+      const source = options.source;
       if (
         runtime.status === "syncing" ||
         runtime.status === "downloading" ||
@@ -244,13 +322,8 @@ export default defineBackground({
             "No auth captured yet. Open https://x.com/i/bookmarks (or refresh it) so the extension can observe the request.",
           );
         }
-        const bookmarksEndpoint = captured.endpoints.Bookmarks;
-        if (!bookmarksEndpoint) {
-          throw new Error(
-            "No Bookmarks endpoint captured yet. Open https://x.com/i/bookmarks and scroll once.",
-          );
-        }
-        appendLog(`Endpoint: Bookmarks (queryId=${bookmarksEndpoint.queryId})`);
+        const ctx = await createSourceContext(source);
+        appendLog(`Endpoint: ${ctx.description}`);
         await persist();
 
         const manifest = await loadManifest(source);
@@ -316,26 +389,21 @@ export default defineBackground({
 
           let json: unknown;
           try {
-            json = await fetchBookmarksPage({
-              host: "x.com",
-              queryId: bookmarksEndpoint.queryId,
-              operation: "Bookmarks",
-              cursor,
-              captured,
-            });
+            json = await ctx.fetchPage(cursor);
           } catch (e) {
             const msg = (e as Error).message ?? String(e);
             if (/HTTP 404/.test(msg) && /Query not found/i.test(msg)) {
               appendLog(
-                "404 — endpoint rotated. Refresh https://x.com/i/bookmarks then click Start sync again.",
+                "404 — endpoint queryId rotated. Visit X again (refresh the relevant page) so the new queryId is captured, then retry.",
               );
             }
             throw e;
           }
-          const { entries, nextCursor } = extractEntries(json);
+          const { entries, nextCursor } = ctx.extractEntries(json);
           let newOnPage = 0;
 
           for (const entry of entries) {
+            if (!ctx.acceptEntry(entry)) continue; // e.g. retweets in user-archive
             const tweet = parseTweetEntry(entry);
             if (!tweet) continue;
             runtime.totalSeen++;
@@ -515,9 +583,7 @@ export default defineBackground({
       appendLog(`Download → ${pendingMedia.length} media items.`);
       await persist();
 
-      // Phase 0: hard-coded bookmarks. Phase 1 will look up the active source
-      // from runtime.options once user-archive sources exist.
-      const source: SourceKey = "bookmarks";
+      const source: SourceKey = (runtime.options?.source as SourceKey) ?? "bookmarks";
       const folder = runtime.options?.folder ?? "xshelf";
       const manifest = await loadManifest(source);
 
