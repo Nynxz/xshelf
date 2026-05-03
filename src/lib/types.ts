@@ -131,6 +131,8 @@ export interface RuntimeState {
 }
 
 export interface SyncOptions {
+  /** Which source to sync. "bookmarks" or "user:<handle>". */
+  source: SourceKey;
   folder: string;
   maxPages: number;
   incremental: boolean;
@@ -138,14 +140,25 @@ export interface SyncOptions {
   earlyStopAfter?: number;
 }
 
+/** GraphQL operations we care about capturing from the page. */
+export type CapturedOpName = "Bookmarks" | "UserByScreenName" | "UserTweets" | "UserMedia";
+
+export const CAPTURED_OP_NAMES: ReadonlyArray<CapturedOpName> = [
+  "Bookmarks",
+  "UserByScreenName",
+  "UserTweets",
+  "UserMedia",
+] as const;
+
 export interface Captured {
   auth: { authorization: string; csrf: string } | null;
-  queryId: string | null;
-  operation: string | null;
+  /** Endpoint metadata keyed by GraphQL operation name. queryId rotates with X releases. */
+  endpoints: Partial<Record<CapturedOpName, { queryId: string }>>;
 }
 
 export interface CapturedSummary {
   hasAuth: boolean;
-  queryId: string | null;
-  operation: string | null;
+  hasBookmarks: boolean;
+  hasUserByScreenName: boolean;
+  hasUserTweets: boolean;
 }

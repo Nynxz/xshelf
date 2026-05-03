@@ -126,11 +126,20 @@ export async function migrateLegacyManifest(): Promise<{ migrated: boolean; coun
 
 export async function loadCaptured(): Promise<Captured> {
   const data = await chrome.storage.local.get(CAPTURED_KEY);
-  const stored = data[CAPTURED_KEY] as Partial<Captured> | undefined;
+  const stored = data[CAPTURED_KEY] as
+    | (Partial<Captured> & { queryId?: string | null; operation?: string | null })
+    | undefined;
+  if (!stored) return { auth: null, endpoints: {} };
+
+  const endpoints: Captured["endpoints"] = { ...(stored.endpoints ?? {}) };
+  // Migrate legacy flat fields ({queryId, operation}) → endpoints.Bookmarks.
+  if (stored.queryId && stored.operation === "Bookmarks" && !endpoints.Bookmarks) {
+    endpoints.Bookmarks = { queryId: stored.queryId };
+  }
+
   return {
-    auth: stored?.auth ?? null,
-    queryId: stored?.queryId ?? null,
-    operation: stored?.operation ?? null,
+    auth: stored.auth ?? null,
+    endpoints,
   };
 }
 

@@ -17,7 +17,7 @@ import type {
   SourceKey,
   SyncOptions,
 } from "../lib/types";
-import { sourceDiskPath } from "../lib/types";
+import { CAPTURED_OP_NAMES, sourceDiskPath } from "../lib/types";
 import {
   clearManifest,
   clearPending,
@@ -54,7 +54,7 @@ export default defineBackground({
     // === STATE ===
     let runtime: RuntimeState = freshRuntime();
     let pendingMedia: PendingMediaItem[] = [];
-    let captured: Captured = { auth: null, queryId: null, operation: null };
+    let captured: Captured = { auth: null, endpoints: {} };
     let cancelFlag = false;
 
     // === PERSISTENCE (throttled) ===
@@ -145,15 +145,6 @@ export default defineBackground({
       pendingMedia = await loadPending();
       recomputeSummary();
       captured = await loadCaptured();
-      // Discard a previously-captured folder-management operation; only the timeline op is useful.
-      if (
-        captured.operation &&
-        (/BookmarkFolders/i.test(captured.operation) || /UpdateBookmark/i.test(captured.operation))
-      ) {
-        captured.operation = null;
-        captured.queryId = null;
-        await saveCaptured(captured);
-      }
 
       if (runtime.status === "syncing" || runtime.status === "cancelling") {
         runtime.status = "interrupted";
@@ -193,26 +184,17 @@ export default defineBackground({
         if (touched && auth.authorization && auth.csrf) {
           captured.auth = { authorization: auth.authorization, csrf: auth.csrf };
         }
-        const m = details.url.match(
-          /\/i\/api\/graphql\/([^/?]+)\/([^/?]*Bookmark[^/?]*)/i,
-        );
+        // Capture every relevant GraphQL endpoint by matching its operation name
+        // against the allow-list. Each rotates independently when X redeploys.
+        const m = details.url.match(/\/i\/api\/graphql\/([^/?]+)\/([^/?]+)/);
         if (m) {
+          const queryId = m[1];
           const op = m[2];
-          const isFolderOnly =
-            /BookmarkFolders/i.test(op) ||
-            /CreateBookmarkFolder/i.test(op) ||
-            /DeleteBookmarkFolder/i.test(op) ||
-            /UpdateBookmark/i.test(op);
-          const isCanonical = /^Bookmarks$/.test(op);
-          if (!isFolderOnly) {
-            if (
-              isCanonical ||
-              !captured.operation ||
-              /BookmarkFolders/i.test(captured.operation)
-            ) {
-              captured.queryId = m[1];
-              captured.operation = op;
+          for (const target of CAPTURED_OP_NAMES) {
+            if (op === target) {
+              captured.endpoints[target] = { queryId };
               touched = true;
+              break;
             }
           }
         }
@@ -262,20 +244,13 @@ export default defineBackground({
             "No auth captured yet. Open https://x.com/i/bookmarks (or refresh it) so the extension can observe the request.",
           );
         }
-        if (!captured.queryId || !captured.operation) {
+        const bookmarksEndpoint = captured.endpoints.Bookmarks;
+        if (!bookmarksEndpoint) {
           throw new Error(
-            "No bookmark endpoint captured yet. Open https://x.com/i/bookmarks and scroll once.",
+            "No Bookmarks endpoint captured yet. Open https://x.com/i/bookmarks and scroll once.",
           );
         }
-        if (
-          /BookmarkFolders/i.test(captured.operation) ||
-          /UpdateBookmark/i.test(captured.operation)
-        ) {
-          throw new Error(
-            `Captured the wrong endpoint (${captured.operation}). Open https://x.com/i/bookmarks (the main list, not a folder) and scroll once.`,
-          );
-        }
-        appendLog(`Endpoint: ${captured.operation} (queryId=${captured.queryId})`);
+        appendLog(`Endpoint: Bookmarks (queryId=${bookmarksEndpoint.queryId})`);
         await persist();
 
         const manifest = await loadManifest(source);
@@ -343,8 +318,8 @@ export default defineBackground({
           try {
             json = await fetchBookmarksPage({
               host: "x.com",
-              queryId: captured.queryId,
-              operation: captured.operation,
+              queryId: bookmarksEndpoint.queryId,
+              operation: "Bookmarks",
               cursor,
               captured,
             });
@@ -699,11 +674,10 @@ export default defineBackground({
                 version: SW_VERSION,
                 state: runtime,
                 captured: {
-                  hasAuth: !!(
-                    captured.auth?.authorization && captured.auth?.csrf
-                  ),
-                  queryId: captured.queryId,
-                  operation: captured.operation,
+                  hasAuth: !!(captured.auth?.authorization && captured.auth?.csrf),
+                  hasBookmarks: !!captured.endpoints.Bookmarks,
+                  hasUserByScreenName: !!captured.endpoints.UserByScreenName,
+                  hasUserTweets: !!captured.endpoints.UserTweets,
                 },
               });
               return;
@@ -774,7 +748,7 @@ export default defineBackground({
               await wipeAll();
               runtime = freshRuntime();
               pendingMedia = [];
-              captured = { auth: null, queryId: null, operation: null };
+              captured = { auth: null, endpoints: {} };
               appendLog("All extension data wiped.");
               await persistNow();
               sendResponse({ ok: true });

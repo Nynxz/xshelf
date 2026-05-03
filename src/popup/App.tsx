@@ -98,7 +98,7 @@ export function App() {
 
       <ActionBar
         status={status}
-        onStartSync={() => send({ type: "startSync", options: { folder, maxPages, incremental } })}
+        onStartSync={() => send({ type: "startSync", options: { source: "bookmarks", folder, maxPages, incremental } })}
         onStartDownload={() => send({ type: "startDownload" })}
         onCancel={() => send({ type: "cancelBackup" })}
         onDiscard={async () => {
@@ -141,16 +141,18 @@ export function App() {
 
 function CaptureLine({ captured }: { captured: CapturedSummary | null }) {
   if (!captured) return <div class="status">Capture: …</div>;
-  if (captured.hasAuth && captured.queryId && captured.operation) {
-    return <div class="status">Capture OK ({captured.operation}, queryId={captured.queryId.slice(0, 10)}…)</div>;
+  const okBookmarks = captured.hasAuth && captured.hasBookmarks;
+  const okUsers = captured.hasAuth && captured.hasUserByScreenName && captured.hasUserTweets;
+  if (okBookmarks && okUsers) {
+    return <div class="status">Capture OK (bookmarks ✓, user-archive ✓)</div>;
   }
-  const missing: string[] = [];
-  if (!captured.hasAuth) missing.push("auth");
-  if (!captured.queryId) missing.push("queryId");
-  if (!captured.operation) missing.push("operation");
+  const parts: string[] = [];
+  if (!captured.hasAuth) parts.push("auth (visit x.com)");
+  if (!captured.hasBookmarks) parts.push("bookmarks (visit x.com/i/bookmarks)");
+  if (!captured.hasUserByScreenName || !captured.hasUserTweets) parts.push("user-archive (visit any profile and scroll)");
   return (
     <div class="status warn">
-      Capture missing: {missing.join(", ")}. Open x.com/i/bookmarks and scroll once.
+      Capture missing: {parts.join("; ")}.
     </div>
   );
 }
