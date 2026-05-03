@@ -15,6 +15,36 @@ export function App() {
   const [incremental, setIncremental] = useState(true);
   const [sourceMode, setSourceMode] = useState<SourceMode>("bookmarks");
   const [userHandle, setUserHandle] = useState("");
+  const [userArchiveMode, setUserArchiveMode] = useState<"media" | "tweets">("media");
+  const [detectedHandle, setDetectedHandle] = useState<string | null>(null);
+
+  // Auto-detect a handle from the active tab if it's an x.com/<handle> profile.
+  // Reserved paths (i, home, search, etc.) are excluded; only valid handle
+  // shapes /^[A-Za-z0-9_]{1,15}$/ count.
+  useEffect(() => {
+    const RESERVED = new Set([
+      "i", "home", "explore", "notifications", "messages", "compose",
+      "settings", "search", "hashtag", "events", "topics", "lists",
+      "communities", "tos", "privacy", "premium_sign_up", "logout",
+    ]);
+    let cancelled = false;
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
+      const tab = tabs[0];
+      if (cancelled || !tab?.url) return;
+      try {
+        const u = new URL(tab.url);
+        if (!/^(x|twitter)\.com$/i.test(u.hostname)) return;
+        const seg = u.pathname.split("/").filter(Boolean)[0];
+        if (!seg) return;
+        if (RESERVED.has(seg)) return;
+        if (!/^[A-Za-z0-9_]{1,15}$/.test(seg)) return;
+        setDetectedHandle(seg);
+      } catch {
+        /* ignore */
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   // Find the most recent on-disk explorer.html snapshot and open it. Uses
   // chrome.downloads.open which respects the user's click as a "gesture" and
@@ -74,20 +104,29 @@ export function App() {
   const status = state?.status ?? "idle";
   const versionMismatch = version != null && version !== SW_VERSION;
 
+  // If the user hasn't typed a handle, fall back to the auto-detected one
+  // from the active tab (so being on https://x.com/elonmusk → archive @elonmusk
+  // with no typing).
+  const effectiveHandle = userHandle.trim() || detectedHandle || "";
+
   function buildSource(): SourceKey | null {
     if (sourceMode === "bookmarks") return "bookmarks";
-    const h = userHandle.trim().replace(/^@/, "");
+    const h = effectiveHandle.replace(/^@/, "");
     if (!/^[a-zA-Z0-9_]{1,15}$/.test(h)) return null;
     return userSource(h);
   }
 
   const computedSource = buildSource();
+  const userOpReady =
+    userArchiveMode === "media"
+      ? !!captured?.hasUserMedia
+      : !!captured?.hasUserTweets;
   const canStartSync =
     !!computedSource &&
     !!captured?.hasAuth &&
     (sourceMode === "bookmarks"
       ? !!captured.hasBookmarks
-      : !!captured.hasUserByScreenName && !!captured.hasUserTweets);
+      : !!captured.hasUserByScreenName && userOpReady);
 
   return (
     <>
@@ -105,6 +144,8 @@ export function App() {
       <SourcePicker
         mode={sourceMode} setMode={setSourceMode}
         handle={userHandle} setHandle={setUserHandle}
+        detectedHandle={detectedHandle}
+        userArchiveMode={userArchiveMode} setUserArchiveMode={setUserArchiveMode}
         disabled={status === "syncing" || status === "downloading" || status === "cancelling"}
       />
       <RunOptions
@@ -130,7 +171,13 @@ export function App() {
           }
           return send({
             type: "startSync",
-            options: { source: computedSource, folder, maxPages, incremental },
+            options: {
+              source: computedSource,
+              folder,
+              maxPages,
+              incremental,
+              userMode: sourceMode === "user" ? userArchiveMode : undefined,
+            },
           });
         }}
         canStartSync={canStartSync}
@@ -177,14 +224,17 @@ export function App() {
 function CaptureLine({ captured }: { captured: CapturedSummary | null }) {
   if (!captured) return <div class="status">Capture: …</div>;
   const okBookmarks = captured.hasAuth && captured.hasBookmarks;
-  const okUsers = captured.hasAuth && captured.hasUserByScreenName && captured.hasUserTweets;
-  if (okBookmarks && okUsers) {
+  const okUsersMedia = captured.hasAuth && captured.hasUserByScreenName && captured.hasUserMedia;
+  const okUsersTweets = captured.hasAuth && captured.hasUserByScreenName && captured.hasUserTweets;
+  if (okBookmarks && okUsersMedia && okUsersTweets) {
     return <div class="status">Capture OK (bookmarks ✓, user-archive ✓)</div>;
   }
   const parts: string[] = [];
   if (!captured.hasAuth) parts.push("auth (visit x.com)");
   if (!captured.hasBookmarks) parts.push("bookmarks (visit x.com/i/bookmarks)");
-  if (!captured.hasUserByScreenName || !captured.hasUserTweets) parts.push("user-archive (visit any profile and scroll)");
+  if (!captured.hasUserByScreenName) parts.push("UserByScreenName (visit any profile)");
+  if (!captured.hasUserMedia) parts.push("UserMedia (visit a profile's Media tab)");
+  if (!captured.hasUserTweets) parts.push("UserTweets (scroll a profile)");
   return (
     <div class="status warn">
       Capture missing: {parts.join("; ")}.
@@ -230,12 +280,16 @@ function RunOptions({
 }
 
 function SourcePicker({
-  mode, setMode, handle, setHandle, disabled,
+  mode, setMode, handle, setHandle, detectedHandle,
+  userArchiveMode, setUserArchiveMode, disabled,
 }: {
   mode: SourceMode;
   setMode: (m: SourceMode) => void;
   handle: string;
   setHandle: (h: string) => void;
+  detectedHandle: string | null;
+  userArchiveMode: "media" | "tweets";
+  setUserArchiveMode: (m: "media" | "tweets") => void;
   disabled: boolean;
 }) {
   return (
@@ -248,20 +302,40 @@ function SourcePicker({
           disabled={disabled}
         >
           <option value="bookmarks">My bookmarks</option>
-          <option value="user">Archive a user</option>
+          <option value="user">Archive a user{detectedHandle ? ` (@${detectedHandle})` : ""}</option>
         </select>
       </div>
       {mode === "user" && (
-        <div class="row">
-          <label for="user-handle">@handle (no leading @)</label>
-          <input
-            id="user-handle" type="text" placeholder="elonmusk" value={handle}
-            onInput={(e) => setHandle((e.target as HTMLInputElement).value)}
-            disabled={disabled}
-            spellcheck={false}
-            autocapitalize="off"
-          />
-        </div>
+        <>
+          <div class="row">
+            <label for="user-handle">
+              @handle{detectedHandle ? ` — leave blank to use @${detectedHandle}` : " (no leading @)"}
+            </label>
+            <input
+              id="user-handle" type="text"
+              placeholder={detectedHandle ?? "elonmusk"}
+              value={handle}
+              onInput={(e) => setHandle((e.target as HTMLInputElement).value)}
+              disabled={disabled}
+              spellcheck={false}
+              autocapitalize="off"
+            />
+          </div>
+          <div class="row checkbox">
+            <input
+              id="include-text"
+              type="checkbox"
+              checked={userArchiveMode === "tweets"}
+              onChange={(e) =>
+                setUserArchiveMode((e.target as HTMLInputElement).checked ? "tweets" : "media")
+              }
+              disabled={disabled}
+            />
+            <label for="include-text">
+              Include text-only posts (slower; uses UserTweets instead of UserMedia)
+            </label>
+          </div>
+        </>
       )}
     </>
   );

@@ -100,7 +100,10 @@ export interface FetchUserTweetsArgs {
   host?: string;
 }
 
-export async function fetchUserTweetsPage(args: FetchUserTweetsArgs): Promise<unknown> {
+async function fetchUserGraphQLPage(
+  operation: "UserTweets" | "UserMedia",
+  args: FetchUserTweetsArgs,
+): Promise<unknown> {
   const { userId, queryId, cursor, captured, host = "x.com" } = args;
   if (!captured.auth) throw new Error("No auth");
   const variables: Record<string, unknown> = {
@@ -112,7 +115,7 @@ export async function fetchUserTweetsPage(args: FetchUserTweetsArgs): Promise<un
     withV2Timeline: true,
   };
   if (cursor) variables.cursor = cursor;
-  const url = new URL(`https://${host}/i/api/graphql/${queryId}/UserTweets`);
+  const url = new URL(`https://${host}/i/api/graphql/${queryId}/${operation}`);
   url.searchParams.set("variables", JSON.stringify(variables));
   url.searchParams.set("features", JSON.stringify(USER_TWEETS_FEATURES));
 
@@ -130,9 +133,17 @@ export async function fetchUserTweetsPage(args: FetchUserTweetsArgs): Promise<un
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`UserTweets failed: HTTP ${res.status}. ${body.slice(0, 200)}`);
+    throw new Error(`${operation} failed: HTTP ${res.status}. ${body.slice(0, 200)}`);
   }
   return res.json();
+}
+
+export function fetchUserTweetsPage(args: FetchUserTweetsArgs): Promise<unknown> {
+  return fetchUserGraphQLPage("UserTweets", args);
+}
+
+export function fetchUserMediaPage(args: FetchUserTweetsArgs): Promise<unknown> {
+  return fetchUserGraphQLPage("UserMedia", args);
 }
 
 export interface ExtractedUserPage {

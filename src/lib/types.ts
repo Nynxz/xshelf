@@ -157,6 +157,13 @@ export interface SyncOptions {
   incremental: boolean;
   /** Threshold of consecutive already-known tweets before we stop paginating. */
   earlyStopAfter?: number;
+  /**
+   * For user-archive sources: which endpoint to paginate.
+   *  - "media" (default) → UserMedia (only media-bearing tweets, faster)
+   *  - "tweets" → UserTweets (all originals incl. text-only; filters retweets)
+   * Ignored for the bookmarks source.
+   */
+  userMode?: "media" | "tweets";
 }
 
 /** GraphQL operations we care about capturing from the page. */
@@ -180,4 +187,5 @@ export interface CapturedSummary {
   hasBookmarks: boolean;
   hasUserByScreenName: boolean;
   hasUserTweets: boolean;
+  hasUserMedia: boolean;
 }

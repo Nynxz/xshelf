@@ -52,6 +52,7 @@ import {
   computeContentHash,
   extractUserTweetsEntries,
   fetchUserByScreenName,
+  fetchUserMediaPage,
   fetchUserTweetsPage,
   isRetweet,
 } from "../lib/users";
@@ -234,7 +235,10 @@ export default defineBackground({
       acceptEntry(entry: unknown): boolean;
     }
 
-    async function createSourceContext(source: SourceKey): Promise<SourceContext> {
+    async function createSourceContext(
+      source: SourceKey,
+      userMode: "media" | "tweets" = "media",
+    ): Promise<SourceContext> {
       if (source === "bookmarks") {
         const ep = captured.endpoints.Bookmarks;
         if (!ep) {
@@ -261,14 +265,21 @@ export default defineBackground({
         const handle = sourceUsername(source);
         if (!handle) throw new Error(`Bad user source: ${source}`);
         const userByScreenName = captured.endpoints.UserByScreenName;
-        const userTweets = captured.endpoints.UserTweets;
-        if (!userByScreenName || !userTweets) {
+        // UserMedia is preferred (faster, only media-bearing tweets); UserTweets
+        // is opt-in via userMode for "include text-only originals".
+        const opName = userMode === "tweets" ? "UserTweets" : "UserMedia";
+        const ep = captured.endpoints[opName];
+        if (!userByScreenName || !ep) {
           const missing: string[] = [];
           if (!userByScreenName) missing.push("UserByScreenName");
-          if (!userTweets) missing.push("UserTweets");
+          if (!ep) missing.push(opName);
+          const visitHint =
+            opName === "UserMedia"
+              ? `https://x.com/${handle}/media`
+              : `https://x.com/${handle}`;
           throw new Error(
             `Missing endpoint${missing.length > 1 ? "s" : ""}: ${missing.join(", ")}. ` +
-              `Visit any X profile (e.g. https://x.com/${handle}) and scroll once so the extension can capture the request.`,
+              `Visit ${visitHint} and scroll once so the extension can capture the request.`,
           );
         }
         appendLog(`Resolving @${handle}…`);
@@ -276,18 +287,20 @@ export default defineBackground({
         const user = await fetchUserByScreenName(handle, userByScreenName.queryId, captured);
         appendLog(`@${handle} → user_id ${user.rest_id}`);
         const userId = user.rest_id;
+        const fetcher = opName === "UserMedia" ? fetchUserMediaPage : fetchUserTweetsPage;
         return {
           source,
-          description: `UserTweets for @${handle} (rest_id=${userId}, queryId=${userTweets.queryId})`,
+          description: `${opName} for @${handle} (rest_id=${userId}, queryId=${ep.queryId})`,
           fetchPage: (cursor) =>
-            fetchUserTweetsPage({
+            fetcher({
               userId,
-              queryId: userTweets.queryId,
+              queryId: ep.queryId,
               cursor,
               captured,
             }),
           extractEntries: extractUserTweetsEntries,
-          acceptEntry: (entry) => !isRetweet(entry), // archive originals only
+          // Originals only — even on UserMedia we filter just in case retweeted media slips through.
+          acceptEntry: (entry) => !isRetweet(entry),
         };
       }
       throw new Error(`Unknown source: ${source}`);
@@ -324,7 +337,7 @@ export default defineBackground({
             "No auth captured yet. Open https://x.com/i/bookmarks (or refresh it) so the extension can observe the request.",
           );
         }
-        const ctx = await createSourceContext(source);
+        const ctx = await createSourceContext(source, options.userMode ?? "media");
         appendLog(`Endpoint: ${ctx.description}`);
         await persist();
 
@@ -796,6 +809,7 @@ export default defineBackground({
                   hasBookmarks: !!captured.endpoints.Bookmarks,
                   hasUserByScreenName: !!captured.endpoints.UserByScreenName,
                   hasUserTweets: !!captured.endpoints.UserTweets,
+                  hasUserMedia: !!captured.endpoints.UserMedia,
                 },
               });
               return;
