@@ -4,10 +4,23 @@
   display: grid;
   grid-template-columns: minmax(220px, 260px) 1fr;
   min-height: 100vh;
+  transition: grid-template-columns 0.18s ease;
+}
+
+.master-layout.sidebar-collapsed {
+  grid-template-columns: 0 1fr;
+}
+.master-layout.sidebar-collapsed .sidebar {
+  display: none;
 }
 
 .master-layout .main-pane {
   min-width: 0; /* lets child shrink so flex/grid contents don't overflow */
+}
+
+.sidebar-toggle {
+  /* Inherits .icon-btn styling. Keep margin tight to title. */
+  flex-shrink: 0;
 }
 
 /* Stick the header to the top of the main pane in master view, not the

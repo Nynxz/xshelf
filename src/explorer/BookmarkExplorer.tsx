@@ -12,6 +12,7 @@ import {
 import { BookmarkCard } from "./BookmarkCard";
 import { GridTile, type MediaPair } from "./GridTile";
 import { Lightbox } from "./Lightbox";
+import { IconSidebar } from "./icons";
 
 const PAGE_SIZE = 50;
 const GRID_PAGE_SIZE = 200;
@@ -122,6 +123,35 @@ export function BookmarkExplorer({ bookmarks, lastRunFinishedAt, sidebar, header
   const visible = items.slice(0, renderedCount);
   const onCloseLightbox = useCallback(() => setLbIndex(-1), []);
 
+  // Sidebar collapse state, persisted across reloads. Only relevant when a
+  // sidebar prop is actually rendered (master view). The button is shown in
+  // either case is gated below.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem("xbd-sidebar-collapsed") === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("xbd-sidebar-collapsed", sidebarCollapsed ? "1" : "0"); } catch {}
+  }, [sidebarCollapsed]);
+
+  const sidebarToggle = sidebar ? (
+    <button
+      class="icon-btn sidebar-toggle"
+      title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+      aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+      aria-pressed={!sidebarCollapsed}
+      onClick={() => setSidebarCollapsed((v) => !v)}
+    >
+      <IconSidebar />
+    </button>
+  ) : null;
+
+  const leading = headerLeft || sidebarToggle ? (
+    <>
+      {sidebarToggle}
+      {headerLeft}
+    </>
+  ) : undefined;
+
   const explorerBody = (
     <>
       <Header
@@ -136,7 +166,7 @@ export function BookmarkExplorer({ bookmarks, lastRunFinishedAt, sidebar, header
         imageFit={imageFit} setImageFit={setImageFit}
         size={size} setSize={setSize}
         lastRunFinishedAt={lastRunFinishedAt}
-        leadingContent={headerLeft}
+        leadingContent={leading}
       />
       <main class={view === "grid" ? "view-grid" : ""}>
         {visible.length === 0 ? (
@@ -174,7 +204,7 @@ export function BookmarkExplorer({ bookmarks, lastRunFinishedAt, sidebar, header
 
   if (sidebar) {
     return (
-      <div class="master-layout">
+      <div class={`master-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         {sidebar}
         <div class="main-pane">{explorerBody}</div>
       </div>

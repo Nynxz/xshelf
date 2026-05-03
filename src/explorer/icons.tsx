@@ -120,3 +120,10 @@ export const IconQuote = (p: IconProps) => svg(p.size, p.class, (
 export const IconPlay = (p: IconProps) => svg(p.size, p.class, (
   <polygon points="6 4 20 12 6 20" fill="currentColor" />
 ), p.title);
+
+export const IconSidebar = (p: IconProps) => svg(p.size, p.class, (
+  <>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="9" y1="4" x2="9" y2="20" />
+  </>
+), p.title);
