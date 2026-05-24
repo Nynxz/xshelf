@@ -78,6 +78,7 @@ export function MasterApp() {
     <BookmarkExplorer
       bookmarks={bookmarks}
       lastRunFinishedAt={lastRunFinishedAt}
+      source={active === ALL_SOURCES ? undefined : (active as SourceKey)}
       sidebar={
         <Sidebar
           sources={allSources}

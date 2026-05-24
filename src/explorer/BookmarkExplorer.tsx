@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from "preact/hooks";
 import type { ComponentChildren } from "preact";
-import type { Bookmark } from "../lib/types";
+import type { Bookmark, SourceKey } from "../lib/types";
 import {
   Header,
   type SortKey,
@@ -12,6 +12,7 @@ import {
 import { BookmarkCard } from "./BookmarkCard";
 import { GridTile, type MediaPair } from "./GridTile";
 import { Lightbox } from "./Lightbox";
+import { MissingScanner } from "./MissingScanner";
 import { IconSidebar } from "./icons";
 
 const PAGE_SIZE = 50;
@@ -30,6 +31,12 @@ interface Props {
   sidebar?: ComponentChildren;
   /** Optional content rendered before the search field in the toolbar. */
   headerLeft?: ComponentChildren;
+  /**
+   * Active source key. When provided, the "Find missing" scanner button is
+   * rendered in the header. Omitted in the master view's "all sources" mode
+   * because the scanner needs a single source key for the exported JSON.
+   */
+  source?: SourceKey;
 }
 
 /**
@@ -39,7 +46,7 @@ interface Props {
  *   - MasterApp.tsx (master explorer; multiple sources, currently-selected
  *     source's bookmarks passed in)
  */
-export function BookmarkExplorer({ bookmarks, lastRunFinishedAt, sidebar, headerLeft }: Props) {
+export function BookmarkExplorer({ bookmarks, lastRunFinishedAt, sidebar, headerLeft, source }: Props) {
   const [view, setView] = useState<ViewMode>("list");
   const [sortBy, setSortBy] = useState<SortKey>("bookmarked-desc");
   const [searchQuery, setSearchQuery] = useState("");
@@ -145,10 +152,15 @@ export function BookmarkExplorer({ bookmarks, lastRunFinishedAt, sidebar, header
     </button>
   ) : null;
 
-  const leading = headerLeft || sidebarToggle ? (
+  const scanner = source ? (
+    <MissingScanner source={source} bookmarks={bookmarks} />
+  ) : null;
+
+  const leading = headerLeft || sidebarToggle || scanner ? (
     <>
       {sidebarToggle}
       {headerLeft}
+      {scanner}
     </>
   ) : undefined;
 

@@ -20,14 +20,20 @@ import type {
   RuntimeState,
   SourceKey,
   SyncOptions,
+  UnbookmarkOptions,
+  UnbookmarkPreviewEntry,
+  UnbookmarkReport,
+  VerifyReport,
 } from "../lib/types";
 import { CAPTURED_OP_NAMES, isUserSource, sourceDiskPath, sourceUsername } from "../lib/types";
 import {
+  addCleanupTombstones,
   clearManifest,
   clearPending,
   freshRuntime,
   listSources,
   loadCaptured,
+  loadCleanupTombstones,
   loadManifest,
   loadPending,
   loadRuntime,
@@ -40,6 +46,7 @@ import {
 } from "../lib/storage";
 import {
   allMediaDownloaded,
+  deleteBookmark,
   extFromUrl,
   extractEntries,
   fetchBookmarksPage,
@@ -51,6 +58,7 @@ import {
   downloadFile,
   existsAtPath,
   mapLimited,
+  pathHasCompletedDownload,
 } from "../lib/downloads";
 import {
   computeContentHash,
@@ -163,6 +171,18 @@ export default defineBackground({
         runtime.status = "interrupted";
         runtime.errorMessage =
           "Service worker was restarted mid-sync. Click Start sync to resume.";
+        appendLog(runtime.errorMessage);
+        await persistNow();
+      } else if (runtime.status === "verifying") {
+        // Verify makes no on-disk changes; safe to drop back to idle on restart.
+        runtime.status = pendingMedia.length > 0 ? "ready" : "idle";
+        runtime.currentPhase = null;
+        appendLog("Verify pass interrupted by service worker restart.");
+        await persistNow();
+      } else if (runtime.status === "unbookmarking") {
+        runtime.status = "interrupted";
+        runtime.errorMessage =
+          "Service worker was restarted mid-unbookmark. Some deletes may have completed — re-sync from x.com/i/bookmarks to see your current state.";
         appendLog(runtime.errorMessage);
         await persistNow();
       } else if (runtime.status === "downloading") {
@@ -500,8 +520,11 @@ export default defineBackground({
 
             if (existing && options.incremental && allMediaDownloaded(existing)) {
               syncEncounterIndex++;
-              existing.lastSeenAt = nowIso;
-              existing.lastSeenIndex = syncEncounterIndex;
+              // DON'T re-stamp lastSeenAt/lastSeenIndex on known items. Doing
+              // so makes the explorer's "newest bookmarked" sort treat the
+              // most recent sync run as if every bookmark were just added,
+              // shoving year-old bookmarks to the top of the feed every time
+              // the user runs sync. We only refresh engagement stats here.
               existing.replyCount = tweet.replyCount;
               existing.retweetCount = tweet.retweetCount;
               existing.favoriteCount = tweet.favoriteCount;
@@ -526,12 +549,19 @@ export default defineBackground({
                 };
               });
               syncEncounterIndex++;
+              // For NEW items, set lastSeenAt to this sync's timestamp so they
+              // sort to the top. For EXISTING-but-partial-download items
+              // (rare: media wasn't all downloaded yet), preserve the original
+              // timestamps so re-syncing-to-finish-downloads doesn't shift
+              // them in the explorer either.
               const merged: Bookmark = {
                 ...tweet,
                 media: mergedMedia,
                 firstSeenAt: existing ? existing.firstSeenAt : nowIso,
-                lastSeenAt: nowIso,
-                lastSeenIndex: syncEncounterIndex,
+                lastSeenAt: existing ? existing.lastSeenAt : nowIso,
+                lastSeenIndex: existing
+                  ? (existing.lastSeenIndex ?? syncEncounterIndex)
+                  : syncEncounterIndex,
               };
               manifest.bookmarks[tweet.id] = merged;
               if (!existing) {
@@ -934,6 +964,589 @@ export default defineBackground({
       }
     }
 
+    /**
+     * Verify pass: for a single source, cross-check every media item in the
+     * manifest against Chrome's download history (NOT the filesystem — extensions
+     * can't `stat` files directly). Reports items that *should* be on disk but
+     * Chrome says aren't, optionally flipping the `downloaded` flag and pushing
+     * them onto the pending queue so the user can re-download with the existing
+     * Download flow.
+     *
+     * `dryRun: true` is the default UX — never modifies state. The user reviews
+     * the report and explicitly opts into the repair pass (`dryRun: false`).
+     *
+     * Concurrency safety: refuses to run while a sync/download is active. Once
+     * started, sets status to "verifying" and locks out concurrent runs.
+     */
+    async function runVerify(
+      source: SourceKey,
+      folder: string,
+      dryRun: boolean,
+    ): Promise<VerifyReport> {
+      if (
+        runtime.status === "syncing" ||
+        runtime.status === "downloading" ||
+        runtime.status === "cancelling" ||
+        runtime.status === "verifying"
+      ) {
+        throw new Error(`Cannot verify from status "${runtime.status}".`);
+      }
+      // Refuse to clobber an existing pending list — the user should download
+      // or discard before verifying, otherwise pendingMedia mixes sources and
+      // runDownload would only update one manifest.
+      if (!dryRun && pendingMedia.length > 0) {
+        throw new Error(
+          `${pendingMedia.length} items already pending — download or discard them before verifying.`,
+        );
+      }
+
+      const prevStatus = runtime.status;
+      runtime.status = "verifying";
+      runtime.currentPhase = dryRun ? "verify (dry run)" : "verify";
+      runtime.errorMessage = null;
+      appendLog(
+        `Verify ${source} (${dryRun ? "dry run" : "repair"}) → folder=${folder}`,
+      );
+      await persist();
+
+      try {
+        const manifest = await loadManifest(source);
+        type Check = {
+          tweetId: string;
+          username: string;
+          mediaIndex: number;
+          kind: PendingMediaItem["kind"];
+          url: string;
+          expectedPath: string;
+          claimedDownloaded: boolean;
+        };
+        const checks: Check[] = [];
+        for (const id of Object.keys(manifest.bookmarks)) {
+          const t = manifest.bookmarks[id];
+          for (const m of t.media ?? []) {
+            if (!m.url) continue;
+            checks.push({
+              tweetId: id,
+              username: t.username,
+              mediaIndex: m.index,
+              kind: m.kind,
+              url: m.url,
+              expectedPath: expectedMediaPath(
+                folder,
+                source,
+                t.id,
+                t.username,
+                m.index,
+                m.kind,
+                m.url,
+              ),
+              claimedDownloaded: m.downloaded,
+            });
+          }
+        }
+
+        appendLog(`Verify: ${checks.length} media items to check.`);
+        await persist();
+
+        const present = await mapLimited(
+          checks,
+          4,
+          (c) => pathHasCompletedDownload(c.expectedPath),
+          (done, total) => {
+            appendLog(`Verify progress: ${done}/${total}`);
+            persist();
+          },
+        );
+
+        const missingItems: PendingMediaItem[] = [];
+        const byUser: VerifyReport["byUser"] = {};
+        let reconcilable = 0;
+        let presentCount = 0;
+
+        for (let i = 0; i < checks.length; i++) {
+          const c = checks[i];
+          const isPresent = present[i];
+          if (isPresent) {
+            presentCount++;
+            if (!c.claimedDownloaded) reconcilable++;
+            continue;
+          }
+          missingItems.push({
+            tweetId: c.tweetId,
+            username: c.username,
+            mediaIndex: c.mediaIndex,
+            kind: c.kind,
+            url: c.url,
+          });
+          const u = c.username || "unknown";
+          if (!byUser[u]) byUser[u] = { missing: 0, photos: 0, videos: 0 };
+          byUser[u].missing++;
+          if (c.kind === "video") byUser[u].videos++;
+          else byUser[u].photos++;
+        }
+
+        const report: VerifyReport = {
+          source,
+          folder,
+          totalMedia: checks.length,
+          presentCount,
+          missingCount: missingItems.length,
+          reconcilableCount: reconcilable,
+          byUser,
+          sample: missingItems.slice(0, 20).map((m) => ({
+            tweetId: m.tweetId,
+            username: m.username,
+            mediaIndex: m.mediaIndex,
+            kind: m.kind,
+          })),
+        };
+
+        appendLog(
+          `Verify: ${presentCount}/${checks.length} present, ${missingItems.length} missing, ${reconcilable} reconcilable.`,
+        );
+
+        if (dryRun) {
+          // Restore prior status — nothing changed on disk or in storage.
+          runtime.status = prevStatus;
+          runtime.currentPhase = null;
+          await persistNow();
+          return report;
+        }
+
+        // Repair pass: update manifest flags + populate pendingMedia.
+        let flagsFlippedTrue = 0;
+        let flagsFlippedFalse = 0;
+        for (let i = 0; i < checks.length; i++) {
+          const c = checks[i];
+          const t = manifest.bookmarks[c.tweetId];
+          const m = t?.media?.find((mm) => mm.index === c.mediaIndex);
+          if (!m) continue;
+          if (present[i] && !c.claimedDownloaded) {
+            m.downloaded = true;
+            flagsFlippedTrue++;
+          } else if (!present[i] && c.claimedDownloaded) {
+            m.downloaded = false;
+            flagsFlippedFalse++;
+          }
+        }
+        if (flagsFlippedTrue || flagsFlippedFalse) {
+          appendLog(
+            `Verify: reconciled ${flagsFlippedTrue} flags up, ${flagsFlippedFalse} flags down.`,
+          );
+          await saveManifest(manifest);
+        }
+
+        if (missingItems.length === 0) {
+          runtime.status = "done";
+          runtime.currentPhase = null;
+          runtime.finishedAt = new Date().toISOString();
+          appendLog(`Verify: ${source} fully verified — nothing missing.`);
+          await persistNow();
+          return report;
+        }
+
+        // Queue for the existing Download flow. Set runtime.options so runDownload
+        // can find the right manifest + folder.
+        pendingMedia = missingItems;
+        recomputeSummary();
+        await savePending(pendingMedia);
+        runtime.options = {
+          source,
+          folder,
+          maxPages: 1,
+          incremental: false,
+        };
+        runtime.mediaTotal = 0;
+        runtime.mediaDone = 0;
+        runtime.mediaSkipped = 0;
+        runtime.mediaErrored = 0;
+        runtime.status = "ready";
+        runtime.currentPhase = null;
+        runtime.finishedAt = new Date().toISOString();
+        appendLog(
+          `Verify: ${missingItems.length} items queued for download — click Download to fetch.`,
+        );
+        await persistNow();
+        return report;
+      } catch (e) {
+        runtime.status = "error";
+        runtime.errorMessage = (e as Error).message ?? String(e);
+        runtime.currentPhase = null;
+        runtime.finishedAt = new Date().toISOString();
+        appendLog(`Verify error: ${runtime.errorMessage}`);
+        await persistNow();
+        throw e;
+      }
+    }
+
+    /**
+     * Write a JSON backup of a source's manifest to
+     *   <folder>/backups/<source>-<iso>.json
+     * Pure read-side: never touches the in-memory manifest, never touches media
+     * files. Used as a safety net before any destructive operation (unbookmark
+     * cleanup), and exposed as a standalone action in the Cleanup tab.
+     */
+    async function backupManifestToDisk(
+      folder: string,
+      source: SourceKey,
+    ): Promise<string> {
+      const manifest = await loadManifest(source);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").replace(/-\d+Z$/, "Z");
+      const sourceTag = source.replace(":", "-");
+      const path = `${folder}/backups/${sourceTag}-${stamp}.json`;
+      const json = JSON.stringify(manifest, null, 2);
+      const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+      await downloadFile(dataUrl, path, "uniquify");
+      appendLog(`Backup written: ${path} (${Object.keys(manifest.bookmarks).length} entries)`);
+      return path;
+    }
+
+    /**
+     * Walk the user's CURRENT X bookmarks via the Bookmarks GraphQL endpoint,
+     * paginating in newest-first cursor order, applying any @username filter,
+     * and returning the items that should be unbookmarked according to the
+     * requested order + cap.
+     *
+     * This is the live source of truth — unlike the previous manifest-based
+     * version, what comes back here is guaranteed to be in the user's actual
+     * bookmarks list at this moment, so we never hit the code-144 "_Missing"
+     * errors caused by stale manifest entries.
+     *
+     * Early-stop for `newest-bookmarked-first`: as soon as we have `count`
+     * matching items, stop paginating. Other orders need a full crawl
+     * (oldest-first requires us to know where the list ends; tweet-date orders
+     * require sorting the full set).
+     */
+    type CrawledCandidate = {
+      id: string;
+      username: string;
+      displayName: string;
+      createdAt?: string;
+      text: string;
+    };
+
+    async function crawlBookmarksForCleanup(
+      options: UnbookmarkOptions,
+      manifest: Manifest,
+      tombstones: Record<string, string>,
+    ): Promise<CrawledCandidate[]> {
+      const ep = captured.endpoints.Bookmarks;
+      if (!captured.auth?.authorization || !captured.auth?.csrf) {
+        throw new Error(
+          "No auth captured. Visit x.com/i/bookmarks and scroll once so the extension can capture your session.",
+        );
+      }
+      if (!ep) {
+        throw new Error(
+          "Bookmarks endpoint not captured yet. Open x.com/i/bookmarks and scroll once.",
+        );
+      }
+
+      const filter = options.usernameFilter?.toLowerCase().replace(/^@/, "").trim() || "";
+      const cap = Math.max(0, Math.min(1000, options.count));
+      const canEarlyStop = options.order === "newest-bookmarked-first";
+
+      const fetched: CrawledCandidate[] = [];
+      let cursor: string | null = null;
+      let pageCount = 0;
+      let skippedAlreadyHandled = 0;
+      const MAX_PAGES = 200; // 200 × ~100 = 20k bookmarks sanity ceiling
+
+      while (pageCount < MAX_PAGES) {
+        if (cancelFlag) break;
+        pageCount++;
+        runtime.pageCount = pageCount;
+        appendLog(
+          `Cleanup scan: page ${pageCount} (${fetched.length} matching, ${skippedAlreadyHandled} skipped-already-handled)…`,
+        );
+        await persist();
+
+        const json = await fetchBookmarksPage({
+          host: "x.com",
+          queryId: ep.queryId,
+          operation: "Bookmarks",
+          cursor,
+          captured,
+        });
+        const { entries, nextCursor } = extractEntries(json);
+
+        for (const entry of entries) {
+          const t = parseTweetEntry(entry);
+          if (!t) continue;
+          if (filter && t.username.toLowerCase() !== filter) continue;
+          // Critical: skip anything we've already unbookmarked in a prior run.
+          // X's API has a brief eventual-consistency window where just-deleted
+          // bookmarks can still appear in the next paginated response. Without
+          // this guard we'd "double-count" them — see them as candidates again,
+          // try to delete (gets 144 "_Missing"), and the user is confused why
+          // the same tweets keep showing up at the top of the list.
+          //
+          // Two signals, both consulted: the manifest's `unbookmarkedAt` stamp
+          // (for items the user had synced before cleanup) AND the standalone
+          // tombstones store (for items the user bookmarked fresh AFTER the
+          // last sync, so we have no manifest entry to stamp).
+          const prior = manifest.bookmarks[t.id];
+          if (prior?.unbookmarkedAt || tombstones[t.id]) {
+            skippedAlreadyHandled++;
+            continue;
+          }
+          fetched.push({
+            id: t.id,
+            username: t.username,
+            displayName: t.displayName,
+            createdAt: t.createdAt,
+            text: t.text,
+          });
+        }
+        runtime.totalSeen = fetched.length;
+        await persist();
+
+        // Early-stop: we already have enough matching items and the cursor
+        // order matches the requested output order.
+        if (canEarlyStop && fetched.length >= cap) {
+          appendLog(`Cleanup scan: ${fetched.length} matches collected — stopping early.`);
+          break;
+        }
+        if (!nextCursor || nextCursor === cursor) {
+          appendLog(`Cleanup scan: end of bookmarks reached (${fetched.length} total matches).`);
+          break;
+        }
+        cursor = nextCursor;
+        // Pacing matched to runSync's cadence.
+        await sleep(1800 + Math.random() * 800);
+      }
+
+      // Sort to requested order. The cursor walks newest-first, so that's
+      // already correct; other orders need explicit sort.
+      switch (options.order) {
+        case "newest-bookmarked-first":
+          break; // cursor order
+        case "oldest-bookmarked-first":
+          fetched.reverse();
+          break;
+        case "newest-tweet-first":
+          fetched.sort(
+            (a, b) => Date.parse(b.createdAt ?? "") - Date.parse(a.createdAt ?? ""),
+          );
+          break;
+        case "oldest-tweet-first":
+          fetched.sort(
+            (a, b) => Date.parse(a.createdAt ?? "") - Date.parse(b.createdAt ?? ""),
+          );
+          break;
+      }
+      return fetched.slice(0, cap);
+    }
+
+    /**
+     * Live-crawl + unbookmark. Pure live-source-of-truth: walks the user's
+     * CURRENT X bookmarks (not the local manifest), applies sort + filter +
+     * cap, then either returns the preview (dry run) or deletes each one.
+     *
+     * Local manifest is touched ONLY to stamp `unbookmarkedAt` on entries the
+     * user already had locally; we never modify media files, never remove
+     * archive entries, never alter any other field. Tweets that X reports
+     * but aren't in the local manifest get unbookmarked-on-X-only (no local
+     * record to stamp — that's fine, the archive grows from future syncs).
+     */
+    async function runUnbookmark(
+      options: UnbookmarkOptions,
+      folder: string,
+    ): Promise<UnbookmarkReport> {
+      if (options.source !== "bookmarks") {
+        throw new Error("Unbookmark only applies to the bookmarks source.");
+      }
+      if (
+        runtime.status === "syncing" ||
+        runtime.status === "downloading" ||
+        runtime.status === "cancelling" ||
+        runtime.status === "verifying" ||
+        runtime.status === "unbookmarking"
+      ) {
+        throw new Error(`Cannot unbookmark while status is "${runtime.status}".`);
+      }
+
+      cancelFlag = false;
+      const prevStatus = runtime.status;
+      runtime.status = "unbookmarking";
+      runtime.currentPhase = "scanning";
+      runtime.errorMessage = null;
+      runtime.startedAt = new Date().toISOString();
+      runtime.pageCount = 0;
+      runtime.totalSeen = 0;
+      runtime.mediaTotal = 0;
+      runtime.mediaDone = 0;
+      runtime.mediaErrored = 0;
+      appendLog(
+        `Cleanup ${options.dryRun ? "(preview)" : ""} · order=${options.order}${options.usernameFilter ? ` · @${options.usernameFilter}` : ""} · count=${options.count}`,
+      );
+      await persist();
+
+      // Load the manifest + tombstones BEFORE the crawl so we can filter out
+      // anything we've already handled in a prior run.
+      const manifest = await loadManifest("bookmarks");
+      const tombstones = await loadCleanupTombstones();
+
+      let candidates: CrawledCandidate[];
+      try {
+        candidates = await crawlBookmarksForCleanup(options, manifest, tombstones);
+      } catch (e) {
+        runtime.status = "error";
+        runtime.errorMessage = (e as Error).message ?? String(e);
+        runtime.currentPhase = null;
+        runtime.finishedAt = new Date().toISOString();
+        appendLog(`Cleanup scan failed: ${runtime.errorMessage}`);
+        await persistNow();
+        throw e;
+      }
+
+      const preview: UnbookmarkPreviewEntry[] = candidates.map((c) => ({
+        id: c.id,
+        username: c.username,
+        displayName: c.displayName,
+        createdAt: c.createdAt,
+        text: c.text.length > 240 ? c.text.slice(0, 240) + "…" : c.text,
+      }));
+
+      if (options.dryRun) {
+        runtime.status = prevStatus;
+        runtime.currentPhase = null;
+        await persistNow();
+        const remaining = Object.values(manifest.bookmarks).filter((b) => !b.unbookmarkedAt).length;
+        return {
+          preview,
+          removed: [],
+          alreadyGone: [],
+          failed: [],
+          remainingAfter: remaining,
+        };
+      }
+
+      // Live run — capture for DeleteBookmark must be present.
+      const ep = captured.endpoints.DeleteBookmark;
+      if (!ep) {
+        runtime.status = "error";
+        runtime.errorMessage =
+          "DeleteBookmark queryId not captured yet. Visit x.com/i/bookmarks, remove ONE bookmark manually, then retry.";
+        runtime.currentPhase = null;
+        runtime.finishedAt = new Date().toISOString();
+        appendLog(runtime.errorMessage);
+        await persistNow();
+        throw new Error(runtime.errorMessage);
+      }
+      if (candidates.length === 0) {
+        runtime.status = "done";
+        runtime.currentPhase = null;
+        runtime.finishedAt = new Date().toISOString();
+        appendLog("Cleanup: 0 candidates after crawl — nothing to remove.");
+        await persistNow();
+        return {
+          preview,
+          removed: [],
+          alreadyGone: [],
+          failed: [],
+          remainingAfter: Object.values(manifest.bookmarks).filter((b) => !b.unbookmarkedAt).length,
+        };
+      }
+
+      runtime.currentPhase = "backup";
+      runtime.mediaTotal = candidates.length;
+      await persist();
+
+      // Always back up the manifest first.
+      try {
+        await backupManifestToDisk(folder, "bookmarks");
+      } catch (e) {
+        runtime.status = "error";
+        runtime.errorMessage = `Backup failed before unbookmarking — aborting. ${(e as Error).message}`;
+        appendLog(runtime.errorMessage);
+        await persistNow();
+        throw e;
+      }
+
+      runtime.currentPhase = "deleting";
+      await persist();
+
+      const removed: string[] = [];
+      const alreadyGone: string[] = [];
+      const failed: Array<{ id: string; error: string }> = [];
+      let consecutiveFails = 0;
+      const MAX_CONSECUTIVE_FAILS = 5;
+
+      for (const c of candidates) {
+        if (cancelFlag) {
+          appendLog("Cleanup cancelled.");
+          break;
+        }
+        try {
+          const result = await deleteBookmark(c.id, ep.queryId, captured);
+          if (result === "removed") removed.push(c.id);
+          else alreadyGone.push(c.id);
+          // Stamp the local entry if we have one. Don't create one if we don't
+          // — that's outside the scope of cleanup; sync owns the archive.
+          const entry = manifest.bookmarks[c.id];
+          if (entry) entry.unbookmarkedAt = new Date().toISOString();
+          consecutiveFails = 0;
+        } catch (e) {
+          const err = (e as Error).message ?? String(e);
+          failed.push({ id: c.id, error: err });
+          consecutiveFails++;
+          appendLog(`× ${c.id} (@${c.username}): ${err}`);
+          if (/HTTP 4(01|03)/.test(err)) {
+            appendLog("Auth rejected — stopping. Refresh x.com and try again.");
+            break;
+          }
+          if (consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
+            appendLog(
+              `${consecutiveFails} consecutive failures — stopping to avoid hammering X.`,
+            );
+            break;
+          }
+        }
+
+        runtime.mediaDone = removed.length + alreadyGone.length;
+        runtime.mediaErrored = failed.length;
+        if ((removed.length + alreadyGone.length + failed.length) % 5 === 0) {
+          await saveManifest(manifest);
+          await persist();
+        }
+
+        if (!cancelFlag) {
+          // Pacing between DeleteBookmark calls. X's actual rate-limit ceiling
+          // for this mutation is well above 1/sec — this is a "look like a
+          // human clicking unbookmark" interval. Tuned from initial 1500-2500
+          // (very conservative, felt frozen) to 800-1400 (still well under
+          // any observed limit).
+          await sleep(800 + Math.random() * 600);
+        }
+      }
+
+      await saveManifest(manifest);
+      // Tombstone EVERY id we handled — including items we didn't have in
+      // the manifest (the user bookmarked them after the last sync). This is
+      // the only persistent record for those, and is what stops the next
+      // crawl from picking them up again during X's eventual-consistency
+      // window.
+      await addCleanupTombstones([...removed, ...alreadyGone]);
+      // Regenerate snapshots so the explorer reflects the unbookmarkedAt stamps.
+      try {
+        await writeSnapshot(folder, manifest);
+        await writeSourceDataJs(folder, manifest);
+        await writeMasterIndex(folder);
+      } catch {}
+
+      runtime.status = cancelFlag ? "cancelled" : "done";
+      runtime.currentPhase = null;
+      runtime.finishedAt = new Date().toISOString();
+      appendLog(
+        `Cleanup done. ${removed.length} removed, ${alreadyGone.length} already gone on X, ${failed.length} failed.`,
+      );
+      await persistNow();
+
+      const remaining = Object.values(manifest.bookmarks).filter((b) => !b.unbookmarkedAt).length;
+      return { preview, removed, alreadyGone, failed, remainingAfter: remaining };
+    }
+
     async function auditAgainstChromeDownloads(
       manifest: Manifest,
       folder: string,
@@ -1008,6 +1621,7 @@ export default defineBackground({
                   hasUserByScreenName: !!captured.endpoints.UserByScreenName,
                   hasUserTweets: !!captured.endpoints.UserTweets,
                   hasUserMedia: !!captured.endpoints.UserMedia,
+                  hasDeleteBookmark: !!captured.endpoints.DeleteBookmark,
                 },
               });
               return;
@@ -1058,6 +1672,12 @@ export default defineBackground({
                 appendLog("Cancel requested.");
                 await persistNow();
                 await cancelAllDownloads();
+              } else if (runtime.status === "unbookmarking") {
+                // Cleanup uses the same cancelFlag — flipping it makes the
+                // crawl loop and delete loop both exit at the next iteration.
+                cancelFlag = true;
+                appendLog("Cleanup cancel requested.");
+                await persistNow();
               }
               sendResponse({ ok: true });
               return;
@@ -1076,6 +1696,139 @@ export default defineBackground({
             case "listSources": {
               const sources = await listSources();
               sendResponse({ ok: true, sources });
+              return;
+            }
+            case "unbookmark": {
+              if (!msg.options || msg.options.source !== "bookmarks") {
+                sendResponse({ ok: false, error: "unbookmark: source must be 'bookmarks'" });
+                return;
+              }
+              try {
+                const folder = (msg.folder as string) || runtime.options?.folder || "xshelf";
+                const report = await runUnbookmark(
+                  msg.options as UnbookmarkOptions,
+                  folder,
+                );
+                sendResponse({ ok: true, report });
+              } catch (e) {
+                sendResponse({ ok: false, error: (e as Error).message ?? String(e) });
+              }
+              return;
+            }
+            case "backupManifest": {
+              try {
+                const folder = (msg.folder as string) || "xshelf";
+                const path = await backupManifestToDisk(folder, "bookmarks");
+                sendResponse({ ok: true, path });
+              } catch (e) {
+                sendResponse({ ok: false, error: (e as Error).message ?? String(e) });
+              }
+              return;
+            }
+            case "importMissingList": {
+              if (
+                runtime.status === "syncing" ||
+                runtime.status === "downloading" ||
+                runtime.status === "cancelling" ||
+                runtime.status === "verifying"
+              ) {
+                sendResponse({ ok: false, error: `Cannot import while status is "${runtime.status}".` });
+                return;
+              }
+              if (!msg.source || !Array.isArray(msg.items)) {
+                sendResponse({ ok: false, error: "importMissingList: missing source or items" });
+                return;
+              }
+              if (pendingMedia.length > 0) {
+                sendResponse({
+                  ok: false,
+                  error: `${pendingMedia.length} items already pending — download or discard them first.`,
+                });
+                return;
+              }
+              const src = msg.source as SourceKey;
+              const folder = (msg.folder as string) || "xshelf";
+              const manifest = await loadManifest(src);
+              const items = msg.items as Array<{
+                tweetId: string;
+                username: string;
+                mediaIndex: number;
+                kind: "photo" | "video";
+                url: string;
+              }>;
+              const queued: PendingMediaItem[] = [];
+              const seenKey = new Set<string>();
+              let skipped = 0;
+              for (const it of items) {
+                const t = manifest.bookmarks[it.tweetId];
+                const m = t?.media?.find((mm) => mm.index === it.mediaIndex);
+                // Prefer the URL we have in the manifest (it's the freshest);
+                // fall back to the URL the explorer included.
+                const url = m?.url || it.url;
+                if (!url) {
+                  skipped++;
+                  continue;
+                }
+                const key = `${it.tweetId}_${it.mediaIndex}`;
+                if (seenKey.has(key)) {
+                  skipped++;
+                  continue;
+                }
+                seenKey.add(key);
+                // Mark the manifest as "not downloaded" so the snapshot/master
+                // explorer reflect reality. The download step will flip it
+                // back to true on success.
+                if (m && m.downloaded) m.downloaded = false;
+                queued.push({
+                  tweetId: it.tweetId,
+                  username: it.username || t?.username || "unknown",
+                  mediaIndex: it.mediaIndex,
+                  kind: it.kind,
+                  url,
+                });
+              }
+              if (queued.length === 0) {
+                appendLog(`Import: 0 items queued (${skipped} skipped).`);
+                await persistNow();
+                sendResponse({ ok: true, queued: 0, skipped });
+                return;
+              }
+              await saveManifest(manifest);
+              pendingMedia = queued;
+              await savePending(pendingMedia);
+              runtime.options = { source: src, folder, maxPages: 1, incremental: false };
+              runtime.mediaTotal = 0;
+              runtime.mediaDone = 0;
+              runtime.mediaSkipped = 0;
+              runtime.mediaErrored = 0;
+              runtime.status = "ready";
+              runtime.currentPhase = null;
+              runtime.errorMessage = null;
+              runtime.finishedAt = new Date().toISOString();
+              recomputeSummary();
+              appendLog(
+                `Import: ${queued.length} item${queued.length === 1 ? "" : "s"} queued for download (${skipped} skipped).`,
+              );
+              await persistNow();
+              sendResponse({ ok: true, queued: queued.length, skipped });
+              return;
+            }
+            case "verifySource": {
+              if (!msg.source) {
+                sendResponse({ ok: false, error: "verifySource: missing source" });
+                return;
+              }
+              const folder = (msg.folder as string) || runtime.options?.folder || "xshelf";
+              try {
+                const report = await runVerify(
+                  msg.source as SourceKey,
+                  folder,
+                  !!msg.dryRun,
+                );
+                sendResponse({ ok: true, report });
+              } catch (e) {
+                sendResponse({ ok: false, error: (e as Error).message ?? String(e) });
+              }
               return;
             }
             case "wipeAll": {

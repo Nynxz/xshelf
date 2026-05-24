@@ -6,6 +6,13 @@ const PENDING_KEY = "xbd_pending_v1";
 
 /** Index of all known source keys; updated whenever a source is added or removed. */
 const SOURCES_KEY = "xbd_sources";
+/**
+ * Cleanup tombstones: tweet IDs we've actively unbookmarked, regardless of
+ * whether they were in the manifest. The cleanup crawl filters against this
+ * so X's eventual-consistency window can't make us double-handle the same
+ * item. Map of `id` → ISO timestamp of when we unbookmarked it.
+ */
+const CLEANUP_TOMBSTONES_KEY = "xbd_cleanup_tombstones";
 /** Per-source manifest key prefix. Final key e.g. `xbd_manifest_bookmarks`,
  *  `xbd_manifest_user_elonmusk` (the colon in `user:<handle>` is replaced by `_`). */
 const MANIFEST_PREFIX = "xbd_manifest_";
@@ -159,6 +166,23 @@ export async function savePending(items: PendingMediaItem[]): Promise<void> {
 
 export async function clearPending(): Promise<void> {
   await chrome.storage.local.remove(PENDING_KEY);
+}
+
+export async function loadCleanupTombstones(): Promise<Record<string, string>> {
+  const data = await chrome.storage.local.get(CLEANUP_TOMBSTONES_KEY);
+  return (data[CLEANUP_TOMBSTONES_KEY] as Record<string, string> | undefined) ?? {};
+}
+
+export async function addCleanupTombstones(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const existing = await loadCleanupTombstones();
+  const now = new Date().toISOString();
+  for (const id of ids) existing[id] = now;
+  await chrome.storage.local.set({ [CLEANUP_TOMBSTONES_KEY]: existing });
+}
+
+export async function clearCleanupTombstones(): Promise<void> {
+  await chrome.storage.local.remove(CLEANUP_TOMBSTONES_KEY);
 }
 
 export async function wipeAll(): Promise<void> {

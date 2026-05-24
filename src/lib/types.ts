@@ -31,6 +31,13 @@ export interface Bookmark {
   lastSeenAt: string;
   /** Position within the most-recent sync's encounter order (1 = newest in that sync). */
   lastSeenIndex: number;
+  /**
+   * If set, the user removed this bookmark from their X account via the
+   * extension's Cleanup tab at this timestamp. The local manifest entry
+   * stays (it's the archive); only the bookmark on X is gone. Future syncs
+   * skip removed items so we never accidentally try to delete them twice.
+   */
+  unbookmarkedAt?: string;
 }
 
 /**
@@ -128,7 +135,31 @@ export type RunStatus =
   | "cancelled"
   | "done"
   | "error"
-  | "interrupted";
+  | "interrupted"
+  | "verifying"
+  | "unbookmarking";
+
+/**
+ * Result of a verify pass: cross-checks every media item in a source's manifest
+ * against Chrome's download history. Read-only — never modifies disk; the caller
+ * decides whether to enqueue the missing items for download.
+ */
+export interface VerifyReport {
+  source: SourceKey;
+  folder: string;
+  /** Total media items inspected (sum of media[] across all bookmarks in source). */
+  totalMedia: number;
+  /** Items confirmed present (Chrome reports a complete download at the expected path). */
+  presentCount: number;
+  /** Items that should be on disk but aren't — these are the candidates to re-download. */
+  missingCount: number;
+  /** Items the manifest claimed weren't downloaded but actually ARE on disk (will be reconciled). */
+  reconcilableCount: number;
+  /** Per-author breakdown of missing items, mirroring PendingSummary.byUser shape. */
+  byUser: Record<string, { missing: number; photos: number; videos: number }>;
+  /** Sample of missing items (capped) for the UI to show specific examples. */
+  sample: Array<{ tweetId: string; username: string; mediaIndex: number; kind: MediaKind }>;
+}
 
 export interface RuntimeState {
   status: RunStatus;
@@ -167,13 +198,19 @@ export interface SyncOptions {
 }
 
 /** GraphQL operations we care about capturing from the page. */
-export type CapturedOpName = "Bookmarks" | "UserByScreenName" | "UserTweets" | "UserMedia";
+export type CapturedOpName =
+  | "Bookmarks"
+  | "UserByScreenName"
+  | "UserTweets"
+  | "UserMedia"
+  | "DeleteBookmark";
 
 export const CAPTURED_OP_NAMES: ReadonlyArray<CapturedOpName> = [
   "Bookmarks",
   "UserByScreenName",
   "UserTweets",
   "UserMedia",
+  "DeleteBookmark",
 ] as const;
 
 export interface Captured {
@@ -188,4 +225,60 @@ export interface CapturedSummary {
   hasUserByScreenName: boolean;
   hasUserTweets: boolean;
   hasUserMedia: boolean;
+  hasDeleteBookmark: boolean;
+}
+
+/**
+ * How to pick which bookmarks to unbookmark when the user runs Cleanup.
+ * Sort + filter + cap, all client-side from the local manifest. The actual
+ * unbookmark call only happens on bookmarks that match.
+ */
+export interface UnbookmarkOptions {
+  /** Source must be "bookmarks" — DeleteBookmark only applies to your own bookmarks. */
+  source: "bookmarks";
+  /**
+   * Ordering of the candidate list. The first `count` items get unbookmarked.
+   *  - "oldest-bookmarked-first" → (lastSeenAt ASC, lastSeenIndex DESC)
+   *  - "newest-bookmarked-first" → (lastSeenAt DESC, lastSeenIndex ASC)
+   *  - "oldest-tweet-first"      → (createdAt ASC)
+   *  - "newest-tweet-first"      → (createdAt DESC)
+   */
+  order:
+    | "oldest-bookmarked-first"
+    | "newest-bookmarked-first"
+    | "oldest-tweet-first"
+    | "newest-tweet-first";
+  /** Optional @username filter (case-insensitive, no @). */
+  usernameFilter?: string;
+  /** Max items to unbookmark in this batch. Capped at 1000 server-side to be safe. */
+  count: number;
+  /** If true, don't actually call DeleteBookmark — just return the preview list. */
+  dryRun: boolean;
+}
+
+export interface UnbookmarkPreviewEntry {
+  id: string;
+  username: string;
+  displayName: string;
+  createdAt?: string;
+  text: string;
+  /** Only set when the candidate came from the local manifest (legacy mode). */
+  lastSeenAt?: string;
+}
+
+export interface UnbookmarkReport {
+  /** What we *would* unbookmark (dry run) or *did* unbookmark (live). */
+  preview: UnbookmarkPreviewEntry[];
+  /** Live-run only — bookmarks X actively removed in this run. */
+  removed: string[];
+  /**
+   * Live-run only — bookmarks X reported as "already gone" (code 144 /
+   * _Missing). The local manifest was stale; same end state as removed, so
+   * we still stamp `unbookmarkedAt` and skip them next time.
+   */
+  alreadyGone: string[];
+  /** Live-run only — items that failed (network error, HTTP error, etc.). */
+  failed: Array<{ id: string; error: string }>;
+  /** Total bookmarks remaining locally that are NOT marked unbookmarkedAt. */
+  remainingAfter: number;
 }

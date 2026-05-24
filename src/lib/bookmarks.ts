@@ -204,4 +204,88 @@ export function allMediaDownloaded(b: Bookmark): boolean {
   return b.media.every((m) => m.downloaded);
 }
 
+/**
+ * Call X's DeleteBookmark mutation for a single tweet. POST to
+ * /i/api/graphql/{queryId}/DeleteBookmark with the tweet_id in the body.
+ *
+ * Returns true if X reports the bookmark was removed (HTTP 2xx with no
+ * `errors` array, OR a 404 — which we treat as "already gone"). Throws with
+ * the X error message on anything else.
+ *
+ * The queryId is captured opportunistically from the user's own page traffic
+ * (see CAPTURED_OP_NAMES). X rotates it on releases — caller surfaces a
+ * "remove one bookmark manually so we can capture the new queryId" hint when
+ * capture is missing or stale.
+ */
+export type DeleteBookmarkResult = "removed" | "already-gone";
+
+export async function deleteBookmark(
+  tweetId: string,
+  queryId: string,
+  captured: Captured,
+): Promise<DeleteBookmarkResult> {
+  if (!captured.auth) throw new Error("No auth");
+  const url = `https://x.com/i/api/graphql/${queryId}/DeleteBookmark`;
+  const body = JSON.stringify({
+    variables: { tweet_id: tweetId },
+    queryId,
+  });
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    referrer: "https://x.com/i/bookmarks",
+    headers: {
+      authorization: captured.auth.authorization,
+      "x-csrf-token": captured.auth.csrf,
+      "x-twitter-active-user": "yes",
+      "x-twitter-auth-type": "OAuth2Session",
+      "x-twitter-client-language": "en",
+      "content-type": "application/json",
+      accept: "*/*",
+    },
+    body,
+  });
+  if (res.status === 404) {
+    // X returns 404 if the bookmark didn't exist OR if the queryId rotated.
+    // Distinguish via the body — "Query not found" means stale queryId.
+    const text = await res.text().catch(() => "");
+    if (/Query not found|queryId/i.test(text)) {
+      throw new Error(
+        `DeleteBookmark HTTP 404 — queryId rotated. Remove ONE bookmark manually on x.com so the new queryId can be captured. Body: ${text.slice(0, 200)}`,
+      );
+    }
+    return "already-gone";
+  }
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(`DeleteBookmark HTTP ${res.status}: ${text.slice(0, 300)}`);
+  }
+  let j: { data?: unknown; errors?: Array<{ message?: string; code?: number }> } | null = null;
+  try {
+    j = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`DeleteBookmark non-JSON response: ${text.slice(0, 200)}`);
+  }
+  if (j?.errors?.length) {
+    const e = j.errors[0];
+    // Code 144 ("_Missing") means the bookmark isn't there anymore on X —
+    // either the user removed it manually outside the extension, or X already
+    // dropped it (deleted tweet, suspended author, etc.). Same end-state we
+    // wanted, so report success. X's error text says "favorites" but that's
+    // their internal store name for user-saved items; same code is used for
+    // bookmarks. The `text` field on the throw path was preserved so the SW
+    // can still log it as informational.
+    if (e?.code === 144 || /_Missing/i.test(e?.message ?? "")) {
+      return "already-gone";
+    }
+    throw new Error(
+      `DeleteBookmark X error${e?.code != null ? ` (code ${e.code})` : ""}: ${e?.message || "unknown"}. Full: ${text.slice(0, 200)}`,
+    );
+  }
+  // Liberal success check: any 2xx with no errors array counts. X has shipped
+  // multiple data-shape variants for this mutation over the years.
+  if (j?.data != null) return "removed";
+  throw new Error(`DeleteBookmark unrecognised payload: ${text.slice(0, 200)}`);
+}
+
 export type { ParsedTweet };

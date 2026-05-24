@@ -462,3 +462,104 @@ main.view-grid .load-more { grid-column: 1 / -1; }
   gap: 4px;
 }
 a { color: var(--accent); }
+
+/* ---- Missing scanner ---- */
+.missing-scan-trigger {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.missing-scan-trigger:hover:not(:disabled) {
+  background: var(--card-hover);
+}
+.missing-scan-trigger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.missing-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.missing-modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  max-width: 460px;
+  width: calc(100% - 32px);
+  padding: 20px 22px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.missing-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.missing-modal h2 {
+  font-size: 16px;
+  margin: 0;
+}
+.missing-modal p {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+.missing-modal .muted { color: var(--muted); }
+.missing-modal .icon-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.missing-modal .icon-close:disabled { opacity: 0.4; cursor: not-allowed; }
+.missing-modal button {
+  padding: 7px 14px;
+  font-size: 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.missing-modal button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.missing-modal button:disabled { opacity: 0.5; cursor: not-allowed; }
+.missing-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.missing-progress {
+  height: 6px;
+  background: rgba(127, 127, 127, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 6px 0 4px;
+}
+.missing-progress .bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.missing-summary {
+  font-size: 14px;
+}
+.missing-summary strong { font-size: 18px; }

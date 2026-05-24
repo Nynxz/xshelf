@@ -128,6 +128,44 @@ export async function existsAtPath(url: string, expectedRelative: string): Promi
 }
 
 /**
+ * Used by Verify: ask Chrome's download history "is there any completed download
+ * whose filename ends with `<expectedRelative>`?" — purely path-based, no URL
+ * matching at all.
+ *
+ * Why path-only? The manifest stores the URL Twitter gave us during the most
+ * recent sync. Twitter rotates URL parameters and CDN hosts; the URL Chrome
+ * recorded at download time often differs from the URL in the manifest today.
+ * URL-keyed verification ends up reporting thousands of "missing" items that
+ * are actually present at the expected path under a different URL. Since the
+ * shared-media-tree layout means every copy of a given tweet lives at exactly
+ * one path (`<folder>/media/<author>/<id>_<n>.<ext>`), checking the path is
+ * both sufficient AND robust to URL drift.
+ *
+ * Also honours `DownloadItem.exists`: if Chrome has noticed the file was
+ * deleted, we report missing even if the download record is still there.
+ */
+export async function pathHasCompletedDownload(expectedRelative: string): Promise<boolean> {
+  try {
+    const target = expectedRelative.replace(/\\/g, "/");
+    // Regex-escape the path, then accept either / or \ as separator (Chrome
+    // returns native separators in DownloadItem.filename).
+    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = escaped.replace(/\//g, "[/\\\\]") + "$";
+    const items = await chrome.downloads.search({
+      filenameRegex: pattern,
+      state: "complete",
+      limit: 5,
+    });
+    if (!items || !items.length) return false;
+    // exists === false → Chrome knows it's gone; exists === true OR undefined
+    // → trust the download record (undefined is the default for older entries).
+    return items.some((it) => it.exists !== false);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Bounded-concurrency map. Critical for chrome.downloads.search calls — without
  * this, audit/pre-flight saturated Chrome's download manager and froze the browser.
  */

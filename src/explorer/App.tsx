@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import type { Bookmark, Manifest } from "../lib/types";
+import type { Bookmark, Manifest, SourceKey } from "../lib/types";
 import { BookmarkExplorer } from "./BookmarkExplorer";
 
 /**
@@ -13,6 +13,7 @@ import { BookmarkExplorer } from "./BookmarkExplorer";
 export function App() {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [lastRunFinishedAt, setLastRunFinishedAt] = useState<string | null>(null);
+  const [source, setSource] = useState<SourceKey | undefined>(undefined);
 
   useEffect(() => {
     // Snapshot mode: bookmarks inlined as <script id="xbd-data" type="application/json">
@@ -27,12 +28,14 @@ export function App() {
           bookmarks: Bookmark[];
           lastRun?: { finishedAt: string };
           mediaPathPrefix?: string;
+          source?: SourceKey;
         };
         // Stash the snapshot's media path prefix on window so card/grid/lightbox
         // components don't have to thread it through.
         (window as any).xshelfMediaPrefix = parsed.mediaPathPrefix ?? "media/";
         setBookmarks(parsed.bookmarks);
         setLastRunFinishedAt(parsed.lastRun?.finishedAt ?? null);
+        setSource(parsed.source);
         return;
       } catch {
         // fall through to live mode
@@ -47,6 +50,7 @@ export function App() {
       if (m) {
         setBookmarks(Object.values(m.bookmarks));
         setLastRunFinishedAt(m.lastRun?.finishedAt ?? null);
+        setSource("bookmarks");
       }
     });
     const onChanged = (changes: Record<string, chrome.storage.StorageChange>) => {
@@ -55,6 +59,7 @@ export function App() {
         if (m) {
           setBookmarks(Object.values(m.bookmarks));
           setLastRunFinishedAt(m.lastRun?.finishedAt ?? null);
+          setSource("bookmarks");
         }
       }
     };
@@ -62,5 +67,11 @@ export function App() {
     return () => chrome.storage.onChanged.removeListener(onChanged);
   }, []);
 
-  return <BookmarkExplorer bookmarks={bookmarks} lastRunFinishedAt={lastRunFinishedAt} />;
+  return (
+    <BookmarkExplorer
+      bookmarks={bookmarks}
+      lastRunFinishedAt={lastRunFinishedAt}
+      source={source}
+    />
+  );
 }
