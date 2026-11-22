@@ -85,48 +85,165 @@ export async function cancelAllDownloads(): Promise<void> {
   xbdById.clear();
 }
 
-/**
- * Has Chrome ever finished downloading this URL? Used to skip re-downloading
- * files we already have. Doesn't pass `exists: true` because that flag is
- * not refreshed in real time and gives false negatives.
- */
-export async function existsByUrl(url: string): Promise<boolean> {
-  try {
-    const items = await chrome.downloads.search({ url, state: "complete", limit: 1 });
-    return items != null && items.length > 0;
-  } catch {
-    return false;
-  }
+const DOWNLOAD_ROOT_KEY = "xbd_download_root";
+
+function normalizeSep(p: string): string {
+  return p.replace(/\\/g, "/");
 }
 
 /**
- * Bounded-concurrency map. Critical for chrome.downloads.search calls — without
- * this, audit/pre-flight saturated Chrome's download manager and froze the browser.
+ * Write a tiny probe file to `<folder>/xbd-probe.txt` and read back the absolute
+ * path Chrome recorded for it. Stripping the relative part gives Chrome's
+ * *current* download directory, spelled exactly the way Chrome spells it in
+ * DownloadItem.filename (symlinked or resolved — doesn't matter, it's
+ * consistent with every download made from now on).
+ *
+ * Why: the existence checks below used to match only the relative path tail,
+ * so after moving the download directory (e.g. to another drive behind a
+ * symlink) every history entry from the OLD directory still matched and
+ * pre-flight/audit/verify skipped files that were never written to the new
+ * one. Anchoring on the probed root makes old-directory entries not count.
+ *
+ * Also doubles as a fail-fast writability check: if Chrome can't write
+ * through the configured directory, this throws once with the interrupt
+ * reason instead of every media item failing individually.
+ *
+ * The probe is removed from disk and erased from history afterwards.
  */
-export async function mapLimited<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, i: number) => Promise<R>,
-  onProgress?: (done: number, total: number) => void,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  let done = 0;
-  async function worker(): Promise<void> {
-    while (true) {
-      const i = nextIndex++;
-      if (i >= items.length) return;
-      try {
-        results[i] = await fn(items[i], i);
-      } catch {
-        results[i] = undefined as unknown as R;
-      }
-      done++;
-      if (onProgress && done % 100 === 0) onProgress(done, items.length);
-    }
+export async function probeDownloadRoot(folder: string): Promise<string> {
+  const rel = `${folder}/xbd-probe.txt`;
+  let id: number;
+  try {
+    id = await downloadFile("data:text/plain;base64,eGJk", rel, "overwrite");
+  } catch (e) {
+    throw new Error(
+      `Chrome couldn't write to "${folder}/" in your download directory ` +
+        `(${(e as Error).message}). Check the directory exists, the symlink ` +
+        `target is mounted and writable, and — for Flatpak/Snap browsers — ` +
+        `that the sandbox is allowed to access the symlink target.`,
+    );
   }
-  const workers: Promise<void>[] = [];
-  for (let k = 0; k < Math.min(limit, items.length); k++) workers.push(worker());
-  await Promise.all(workers);
-  return results;
+  const [item] = await chrome.downloads.search({ id });
+  const actual = normalizeSep(item?.filename ?? "");
+  const suffix = "/" + normalizeSep(rel);
+  try {
+    await chrome.downloads.removeFile(id);
+  } catch {
+    // ignore — leaving a 3-byte probe behind is harmless
+  }
+  try {
+    await chrome.downloads.erase({ id });
+  } catch {
+    // ignore
+  }
+  if (!actual.endsWith(suffix)) {
+    throw new Error(
+      `Probe landed at an unexpected path (${actual || "unknown"}); expected it to end with ${suffix}.`,
+    );
+  }
+  const root = actual.slice(0, -suffix.length);
+  try {
+    await chrome.storage.local.set({ [DOWNLOAD_ROOT_KEY]: root });
+  } catch {
+    // ignore — only used by the popup's "Open explorer"
+  }
+  return root;
+}
+
+/** Last download root seen by probeDownloadRoot, or null if none yet. */
+export async function loadDownloadRoot(): Promise<string | null> {
+  try {
+    const data = await chrome.storage.local.get(DOWNLOAD_ROOT_KEY);
+    return (data[DOWNLOAD_ROOT_KEY] as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Regex-escape a path, accepting either separator (Chrome reports native ones). */
+function escapePathRegex(path: string): string {
+  return path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\//g, "[/\\\\]");
+}
+
+/** Regex matching `<root>/<relative>` exactly, with either separator. */
+export function absolutePathRegex(root: string, relative: string): string {
+  return "^" + escapePathRegex(normalizeSep(root) + "/" + normalizeSep(relative)) + "$";
+}
+
+/**
+ * One-shot snapshot of Chrome's download history under `<root>/<folder>/`,
+ * for answering "is this file already downloaded?" for many files at once.
+ *
+ * This replaced a per-file `chrome.downloads.search`: each search scans the
+ * whole history, so checking N files cost N × history-size regex matches —
+ * with ~70k files that pegged the CPU for minutes. One search + a Set lookup
+ * per file is linear.
+ *
+ * Paths are anchored on `root` (from probeDownloadRoot) so entries from a
+ * previous download directory don't count, and entries Chrome knows were
+ * deleted (`exists === false`) are dropped. `exists` isn't refreshed in real
+ * time, so this is still history, not a disk check (the explorer's
+ * Check disk is that).
+ */
+export interface DownloadIndex {
+  /** Completed downloads indexed (after filtering). */
+  size: number;
+  /** A completed download sits at exactly `<root>/<relative>`. Robust to URL drift. */
+  hasPath(relative: string): boolean;
+  /** As hasPath, and that download was of `url`. */
+  hasUrlAt(url: string, relative: string): boolean;
+}
+
+export async function buildDownloadIndex(root: string, folder: string): Promise<DownloadIndex> {
+  const base = normalizeSep(root) + "/";
+  const items = await chrome.downloads.search({
+    filenameRegex: "^" + escapePathRegex(base + normalizeSep(folder) + "/"),
+    state: "complete",
+    limit: 0, // 0 = no limit
+  });
+  const paths = new Set<string>();
+  const urlAt = new Set<string>();
+  for (const it of items) {
+    if (it.exists === false) continue;
+    const f = normalizeSep(it.filename || "");
+    paths.add(f);
+    urlAt.add(`${it.url}\n${f}`);
+    if (it.finalUrl && it.finalUrl !== it.url) urlAt.add(`${it.finalUrl}\n${f}`);
+  }
+  return {
+    size: paths.size,
+    hasPath: (rel) => paths.has(base + normalizeSep(rel)),
+    hasUrlAt: (url, rel) => urlAt.has(`${url}\n${base}${normalizeSep(rel)}`),
+  };
+}
+
+/**
+ * Where else has Chrome recorded `<folder>/media/` downloads? Groups history
+ * entries that are NOT under the current `root` by the directory holding
+ * `<folder>/`, largest first. Explains a Verify that reports lots missing
+ * after the download directory moved (those files exist, just recorded
+ * under the old path). One history search.
+ */
+export async function downloadsElsewhere(
+  root: string,
+  folder: string,
+): Promise<Array<{ dir: string; count: number }>> {
+  const marker = "/" + normalizeSep(folder) + "/media/";
+  const items = await chrome.downloads.search({
+    filenameRegex: escapePathRegex(marker),
+    state: "complete",
+    limit: 0,
+  });
+  const base = normalizeSep(root) + "/";
+  const counts = new Map<string, number>();
+  for (const it of items) {
+    const f = normalizeSep(it.filename || "");
+    if (f.startsWith(base)) continue;
+    const dir = f.slice(0, f.indexOf(marker)) || "(unknown)";
+    counts.set(dir, (counts.get(dir) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([dir, count]) => ({ dir, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import { extFromUrl, sanitizeUsername } from "../lib/bookmarks";
-import { fmtDate, fmtNum, linkify } from "./util";
+import { fmtDate, fmtNum, linkify, mediaPath } from "./util";
 import type { MediaPair } from "./GridTile";
 import { IconClose, IconChevronLeft, IconChevronRight, IconInfo, IconExternal, IconReply, IconRetweet, IconHeart, IconQuote } from "./icons";
 
@@ -30,7 +30,7 @@ export function Lightbox({ mediaList, index, onClose, onNavigate }: LightboxProp
   const { b, m } = pair;
   const safeUser = sanitizeUsername(b.username);
   const ext = m.kind === "video" ? "mp4" : (extFromUrl(m.url) ?? "jpg");
-  const localPath = `media/${safeUser}/${b.id}_${m.index}.${ext}`;
+  const localPath = mediaPath(safeUser, b.id, m.index, ext);
 
   return (
     <div

@@ -1,16 +1,44 @@
-import type { Captured, Manifest, PendingMediaItem, RuntimeState } from "./types";
+import type { Captured, Manifest, PendingMediaItem, RuntimeState, SourceKey, VerifyReport } from "./types";
 
 const RUN_STATE_KEY = "xbd_runState";
-const MANIFEST_KEY = "xbd_manifest_v1";
 const CAPTURED_KEY = "xbd_captured_v1";
 const PENDING_KEY = "xbd_pending_v1";
 
+/** Index of all known source keys; updated whenever a source is added or removed. */
+const SOURCES_KEY = "xbd_sources";
+/**
+ * Cleanup tombstones: tweet IDs we've actively unbookmarked, regardless of
+ * whether they were in the manifest. The cleanup crawl filters against this
+ * so X's eventual-consistency window can't make us double-handle the same
+ * item. Map of `id` → ISO timestamp of when we unbookmarked it.
+ */
+const CLEANUP_TOMBSTONES_KEY = "xbd_cleanup_tombstones";
+/**
+ * Latest Verify report per source. Kept in storage (not just popup state)
+ * because a verify of a large archive outlives the popup: it closes on any
+ * click elsewhere, and the result would otherwise be lost.
+ */
+const VERIFY_REPORTS_KEY = "xbd_verify_reports";
+/** Per-source manifest key prefix. Final key e.g. `xbd_manifest_bookmarks`,
+ *  `xbd_manifest_user_elonmusk` (the colon in `user:<handle>` is replaced by `_`). */
+const MANIFEST_PREFIX = "xbd_manifest_";
+
+/** Legacy single-bookmark manifest key from v1. Auto-migrated on startup. */
+const LEGACY_MANIFEST_KEY = "xbd_manifest_v1";
+const MIGRATION_DONE_KEY = "xbd_migration_v2_done";
+
 export const StorageKeys = {
   runState: RUN_STATE_KEY,
-  manifest: MANIFEST_KEY,
   captured: CAPTURED_KEY,
   pending: PENDING_KEY,
+  sources: SOURCES_KEY,
 } as const;
+
+export function manifestStorageKey(source: SourceKey): string {
+  // chrome.storage keys can have colons but we replace for cosmetic consistency
+  // with the disk path (no colon-paths in filesystems).
+  return MANIFEST_PREFIX + source.replace(":", "_");
+}
 
 export function freshRuntime(): RuntimeState {
   return {
@@ -33,8 +61,8 @@ export function freshRuntime(): RuntimeState {
   };
 }
 
-export function freshManifest(): Manifest {
-  return { version: 1, bookmarks: {}, lastRun: null };
+export function freshManifest(source: SourceKey): Manifest {
+  return { version: 2, source, bookmarks: {}, lastRun: null };
 }
 
 export async function loadRuntime(): Promise<RuntimeState | null> {
@@ -46,26 +74,91 @@ export async function saveRuntime(runtime: RuntimeState): Promise<void> {
   await chrome.storage.local.set({ [RUN_STATE_KEY]: runtime });
 }
 
-export async function loadManifest(): Promise<Manifest> {
-  const data = await chrome.storage.local.get(MANIFEST_KEY);
-  return (data[MANIFEST_KEY] as Manifest | undefined) ?? freshManifest();
+export async function listSources(): Promise<SourceKey[]> {
+  const data = await chrome.storage.local.get(SOURCES_KEY);
+  const arr = data[SOURCES_KEY];
+  return Array.isArray(arr) ? (arr as SourceKey[]) : [];
+}
+
+export async function registerSource(source: SourceKey): Promise<void> {
+  const sources = await listSources();
+  if (sources.includes(source)) return;
+  sources.push(source);
+  await chrome.storage.local.set({ [SOURCES_KEY]: sources });
+}
+
+export async function unregisterSource(source: SourceKey): Promise<void> {
+  const sources = await listSources();
+  const next = sources.filter((s) => s !== source);
+  await chrome.storage.local.set({ [SOURCES_KEY]: next });
+  await chrome.storage.local.remove(manifestStorageKey(source));
+}
+
+export async function loadManifest(source: SourceKey): Promise<Manifest> {
+  const key = manifestStorageKey(source);
+  const data = await chrome.storage.local.get(key);
+  return (data[key] as Manifest | undefined) ?? freshManifest(source);
 }
 
 export async function saveManifest(m: Manifest): Promise<void> {
-  await chrome.storage.local.set({ [MANIFEST_KEY]: m });
+  await chrome.storage.local.set({ [manifestStorageKey(m.source)]: m });
+  await registerSource(m.source);
 }
 
-export async function clearManifest(): Promise<void> {
-  await chrome.storage.local.remove(MANIFEST_KEY);
+export async function clearManifest(source: SourceKey): Promise<void> {
+  await chrome.storage.local.remove(manifestStorageKey(source));
+}
+
+/**
+ * Migrate a v1 manifest stored under `xbd_manifest_v1` to the v2 multi-source
+ * layout (under `xbd_manifest_bookmarks`, with the source registered in the
+ * index). Idempotent — runs at most once per profile.
+ */
+export async function migrateLegacyManifest(): Promise<{ migrated: boolean; count: number }> {
+  const flags = await chrome.storage.local.get([MIGRATION_DONE_KEY, LEGACY_MANIFEST_KEY]);
+  if (flags[MIGRATION_DONE_KEY]) return { migrated: false, count: 0 };
+
+  const legacy = flags[LEGACY_MANIFEST_KEY] as { bookmarks?: Record<string, unknown>; lastRun?: unknown } | undefined;
+  if (!legacy || !legacy.bookmarks) {
+    await chrome.storage.local.set({ [MIGRATION_DONE_KEY]: true });
+    return { migrated: false, count: 0 };
+  }
+
+  const v2: Manifest = {
+    version: 2,
+    source: "bookmarks",
+    bookmarks: legacy.bookmarks as Manifest["bookmarks"],
+    lastRun: (legacy.lastRun as Manifest["lastRun"]) ?? null,
+  };
+  await saveManifest(v2);
+  await chrome.storage.local.set({ [MIGRATION_DONE_KEY]: true });
+  // Don't delete the legacy key for a release — gives the user a recovery path
+  // if anything goes wrong with the new code.
+  return { migrated: true, count: Object.keys(v2.bookmarks).length };
 }
 
 export async function loadCaptured(): Promise<Captured> {
   const data = await chrome.storage.local.get(CAPTURED_KEY);
-  const stored = data[CAPTURED_KEY] as Partial<Captured> | undefined;
+  const stored = data[CAPTURED_KEY] as
+    | (Partial<Captured> & { queryId?: string | null; operation?: string | null })
+    | undefined;
+  if (!stored) return { auth: null, endpoints: {}, userMedia: {} };
+
+  const endpoints: Captured["endpoints"] = { ...(stored.endpoints ?? {}) };
+  // Migrate legacy flat fields ({queryId, operation}) → endpoints.Bookmarks.
+  if (stored.queryId && stored.operation === "Bookmarks" && !endpoints.Bookmarks) {
+    endpoints.Bookmarks = { queryId: stored.queryId };
+  }
+
+  // Spread `stored` first so every captured field survives a service-worker
+  // restart — the mutation body/URL/header templates and the per-variant
+  // UserMedia requests all live here, and dropping them means the Cleanup and
+  // media-filter flows silently fall back to guessed requests.
   return {
-    auth: stored?.auth ?? null,
-    queryId: stored?.queryId ?? null,
-    operation: stored?.operation ?? null,
+    ...stored,
+    auth: stored.auth ?? null,
+    endpoints,
+    userMedia: stored.userMedia ?? {},
   };
 }
 
@@ -87,6 +180,23 @@ export async function clearPending(): Promise<void> {
   await chrome.storage.local.remove(PENDING_KEY);
 }
 
+export async function loadCleanupTombstones(): Promise<Record<string, string>> {
+  const data = await chrome.storage.local.get(CLEANUP_TOMBSTONES_KEY);
+  return (data[CLEANUP_TOMBSTONES_KEY] as Record<string, string> | undefined) ?? {};
+}
+
+export async function addCleanupTombstones(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const existing = await loadCleanupTombstones();
+  const now = new Date().toISOString();
+  for (const id of ids) existing[id] = now;
+  await chrome.storage.local.set({ [CLEANUP_TOMBSTONES_KEY]: existing });
+}
+
+export async function clearCleanupTombstones(): Promise<void> {
+  await chrome.storage.local.remove(CLEANUP_TOMBSTONES_KEY);
+}
+
 export async function wipeAll(): Promise<void> {
   await chrome.storage.local.clear();
   try {
@@ -94,4 +204,21 @@ export async function wipeAll(): Promise<void> {
   } catch {
     // not all browsers support session storage
   }
+}
+
+export async function loadVerifyReports(): Promise<Record<string, VerifyReport>> {
+  const data = await chrome.storage.local.get(VERIFY_REPORTS_KEY);
+  return (data[VERIFY_REPORTS_KEY] as Record<string, VerifyReport> | undefined) ?? {};
+}
+
+export async function saveVerifyReport(report: VerifyReport): Promise<void> {
+  const all = await loadVerifyReports();
+  all[report.source] = report;
+  await chrome.storage.local.set({ [VERIFY_REPORTS_KEY]: all });
+}
+
+export async function clearVerifyReport(source: SourceKey): Promise<void> {
+  const all = await loadVerifyReports();
+  delete all[source];
+  await chrome.storage.local.set({ [VERIFY_REPORTS_KEY]: all });
 }

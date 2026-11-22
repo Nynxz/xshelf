@@ -9,8 +9,7 @@ export default defineConfig({
   manifest: {
     name: "X Bookmark Downloader",
     description:
-      "Backs up your X/Twitter bookmarks (text, full-res images, videos, metadata). Read-only — never modifies your bookmarks.",
-    version: "0.2.0",
+      "Back up your X/Twitter bookmarks and profile media to a local archive with an offline explorer.",
     permissions: [
       "downloads",
       "downloads.open",

@@ -23,6 +23,17 @@ export function fmtNum(n: number | undefined): string {
   return String(n);
 }
 
+/**
+ * Build a relative media path that respects the snapshot's depth from the
+ * shared `<folder>/media/` tree. Set by App.tsx on data load via
+ * `window.xshelfMediaPrefix` ("media/" for the master, "../media/" for
+ * `bookmarks/explorer.html`, "../../media/" for `users/<h>/explorer.html`).
+ */
+export function mediaPath(safeUser: string, tweetId: string, mediaIndex: number, ext: string): string {
+  const prefix = (window as { xshelfMediaPrefix?: string }).xshelfMediaPrefix ?? "media/";
+  return `${prefix}${safeUser}/${tweetId}_${mediaIndex}.${ext}`;
+}
+
 export function fmtDate(s: string | undefined): string {
   if (!s) return "";
   try {

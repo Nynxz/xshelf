@@ -6,4 +6,7 @@ node_modules
 dist
 build
 src/snapshot/dist
-public
+src/master/dist
+src/shelf/dist
+# Root-level only: src/public holds the committed extension icons.
+/public

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import type { ComponentChildren } from "preact";
 import { IconList, IconGrid, IconSettings } from "./icons";
 
 export type ViewMode = "list" | "grid";
@@ -32,6 +33,8 @@ interface HeaderProps {
   size: DisplaySize;
   setSize: (s: DisplaySize) => void;
   lastRunFinishedAt: string | null;
+  /** Optional content rendered before the title (used by master view to surface the active source label). */
+  leadingContent?: ComponentChildren;
 }
 
 export function Header(props: HeaderProps) {
@@ -45,6 +48,7 @@ export function Header(props: HeaderProps) {
   return (
     <header>
       <div class="header-inner">
+        {props.leadingContent}
         <h1>
           Bookmarks<span class="count">{props.count !== props.total ? `${props.count} / ${props.total}` : props.total}</span>
         </h1>
