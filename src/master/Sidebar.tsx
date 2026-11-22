@@ -28,6 +28,9 @@ export function Sidebar({ sources, active, allKey, onSelect }: Props) {
   return (
     <aside class="sidebar">
       <div class="sidebar-title">xshelf</div>
+      <a class="source-pill" href="index.html">
+        <span class="source-name">New explorer →</span>
+      </a>
 
       <button
         class={`source-pill ${active === allKey ? "active" : ""}`}

@@ -1,3 +1,4 @@
+import "../assets/favicon";
 import { render } from "preact";
 import { MasterApp } from "./MasterApp";
 import "../explorer/explorer.css";

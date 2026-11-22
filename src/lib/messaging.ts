@@ -47,7 +47,15 @@ export type RequestMessage =
         mediaIndex: number;
         kind: "photo" | "video";
         url: string;
+        /** Per-item sources (missing-list v2); falls back to `source`. */
+        sources?: import("./types").SourceKey[];
       }>;
+      /**
+       * Disk-scan list v2 only: items the scan found ON disk, as
+       * [tweetId, mediaIndex, sources]. Their `downloaded` flags are set true,
+       * so the import resyncs flags in both directions.
+       */
+      present?: Array<[string, number, import("./types").SourceKey[]]>;
     }
   /**
    * Cleanup: remove bookmarks from the user's X account in batches.
@@ -61,7 +69,19 @@ export type RequestMessage =
    */
   | { type: "unbookmark"; options: UnbookmarkOptions; folder: string }
   /** Write the bookmarks manifest as JSON to <folder>/backups/bookmarks-<iso>.json. */
-  | { type: "backupManifest"; folder: string };
+  | { type: "backupManifest"; folder: string }
+  /**
+   * Rewrite xshelf/index.html + classic.html without syncing, to pick up a
+   * newer explorer build. Per-source data.js files are left as they are.
+   */
+  | { type: "rebuildExplorer"; folder: string }
+  /**
+   * Wipe the cleanup tombstone store. The next cleanup crawl will not filter
+   * any tweet by past-handled state (manifest's own unbookmarkedAt stamps
+   * still apply within their TTL). Use when you've re-bookmarked items that
+   * cleanup is still skipping.
+   */
+  | { type: "clearCleanupHistory" };
 
 export type ResponseFor<T extends RequestMessage["type"]> =
   T extends "getRunState"
@@ -73,7 +93,7 @@ export type ResponseFor<T extends RequestMessage["type"]> =
         : T extends "verifySource"
           ? { ok: true; report: VerifyReport } | { ok: false; error: string }
           : T extends "importMissingList"
-            ? { ok: true; queued: number; skipped: number } | { ok: false; error: string }
+            ? { ok: true; queued: number; skipped: number; reconciled: number } | { ok: false; error: string }
             : T extends "unbookmark"
               ? { ok: true; report: UnbookmarkReport } | { ok: false; error: string }
               : T extends "backupManifest"
@@ -84,7 +104,7 @@ export type ResponseFor<T extends RequestMessage["type"]> =
 export type BroadcastMessage =
   | { type: "stateUpdate"; state: RuntimeState };
 
-export const SW_VERSION = "v39-stable-sort";
+export const SW_VERSION = "v46-media-filters";
 
 export function send<T extends RequestMessage>(
   msg: T,

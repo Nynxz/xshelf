@@ -37,11 +37,16 @@ export interface FetchPageArgs {
   captured: Captured;
 }
 
-export async function fetchBookmarksPage(args: FetchPageArgs): Promise<unknown> {
+export async function fetchBookmarksPage(
+  args: FetchPageArgs,
+): Promise<unknown> {
   const { host, queryId, operation, cursor, captured } = args;
   if (!captured.auth) throw new Error("No auth");
 
-  const variables: Record<string, unknown> = { count: 100, includePromotedContent: false };
+  const variables: Record<string, unknown> = {
+    count: 100,
+    includePromotedContent: false,
+  };
   if (cursor) variables.cursor = cursor;
   const url = new URL(`https://${host}/i/api/graphql/${queryId}/${operation}`);
   url.searchParams.set("variables", JSON.stringify(variables));
@@ -61,7 +66,9 @@ export async function fetchBookmarksPage(args: FetchPageArgs): Promise<unknown> 
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`Bookmarks request failed: HTTP ${res.status}. ${body.slice(0, 200)}`);
+    throw new Error(
+      `Bookmarks request failed: HTTP ${res.status}. ${body.slice(0, 200)}`,
+    );
   }
   return res.json();
 }
@@ -73,24 +80,37 @@ export interface ExtractedPage {
 
 export function extractEntries(json: unknown): ExtractedPage {
   // Defensively walk X's response shape.
-  const j = json as { data?: { bookmark_timeline_v2?: { timeline?: { instructions?: unknown[] } } } };
-  const instructions = j?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
+  const j = json as {
+    data?: {
+      bookmark_timeline_v2?: { timeline?: { instructions?: unknown[] } };
+    };
+  };
+  const instructions =
+    j?.data?.bookmark_timeline_v2?.timeline?.instructions ?? [];
   let entries: unknown[] = [];
-  for (const ins of instructions as Array<{ type?: string; entries?: unknown[] }>) {
+  for (const ins of instructions as Array<{
+    type?: string;
+    entries?: unknown[];
+  }>) {
     if (ins.type === "TimelineAddEntries" && Array.isArray(ins.entries)) {
       entries = entries.concat(ins.entries);
     }
   }
   let nextCursor: string | null = null;
-  for (const e of entries as Array<{ content?: { entryType?: string; cursorType?: string; value?: string } }>) {
+  for (const e of entries as Array<{
+    content?: { entryType?: string; cursorType?: string; value?: string };
+  }>) {
     const c = e?.content;
-    if (c?.entryType === "TimelineTimelineCursor" && c?.cursorType === "Bottom") {
+    if (
+      c?.entryType === "TimelineTimelineCursor" &&
+      c?.cursorType === "Bottom"
+    ) {
       nextCursor = c.value ?? null;
     }
   }
-  const tweetEntries = (entries as Array<{ content?: { entryType?: string } }>).filter(
-    (e) => e?.content?.entryType === "TimelineTimelineItem",
-  );
+  const tweetEntries = (
+    entries as Array<{ content?: { entryType?: string } }>
+  ).filter((e) => e?.content?.entryType === "TimelineTimelineItem");
   return { entries: tweetEntries, nextCursor };
 }
 
@@ -116,7 +136,8 @@ export function parseTweetEntry(entry: unknown): ParsedTweet | null {
     if (!item || item.itemType !== "TimelineTweet") return null;
     const tr = item.tweet_results?.result;
     if (!tr) return null;
-    const tweet = tr.__typename === "TweetWithVisibilityResults" ? tr.tweet : tr;
+    const tweet =
+      tr.__typename === "TweetWithVisibilityResults" ? tr.tweet : tr;
     if (!tweet?.legacy) return null;
 
     const legacy = tweet.legacy;
@@ -124,27 +145,43 @@ export function parseTweetEntry(entry: unknown): ParsedTweet | null {
     const userLegacy = userResult?.legacy;
     const username: string =
       userLegacy?.screen_name ?? userResult?.core?.screen_name ?? "unknown";
-    const displayName: string = userLegacy?.name ?? userResult?.core?.name ?? "";
+    const displayName: string =
+      userLegacy?.name ?? userResult?.core?.name ?? "";
 
     const id: string = legacy.id_str || tweet.rest_id;
     const text: string =
-      tweet.note_tweet?.note_tweet_results?.result?.text ?? legacy.full_text ?? "";
+      tweet.note_tweet?.note_tweet_results?.result?.text ??
+      legacy.full_text ??
+      "";
 
     const media: Omit<Media, "downloaded">[] = [];
     const mediaArr: any[] =
       legacy.extended_entities?.media ?? legacy.entities?.media ?? [];
     mediaArr.forEach((m, i) => {
+      const size =
+        m.original_info?.width && m.original_info?.height
+          ? { width: m.original_info.width as number, height: m.original_info.height as number }
+          : {};
       if (m.type === "photo") {
-        media.push({ kind: "photo", index: i, url: toOrigPhoto(m.media_url_https) });
+        media.push({
+          kind: "photo",
+          index: i,
+          url: toOrigPhoto(m.media_url_https),
+          ...size,
+        });
       } else if (m.type === "video" || m.type === "animated_gif") {
-        const variants: Array<{ content_type: string; bitrate?: number; url: string }> =
-          m.video_info?.variants ?? [];
+        const variants: Array<{
+          content_type: string;
+          bitrate?: number;
+          url: string;
+        }> = m.video_info?.variants ?? [];
         const mp4s = variants.filter(
-          (v) => v.content_type === "video/mp4" && typeof v.bitrate === "number",
+          (v) =>
+            v.content_type === "video/mp4" && typeof v.bitrate === "number",
         );
         mp4s.sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0));
         const best = mp4s[0] ?? variants[0];
-        if (best?.url) media.push({ kind: "video", index: i, url: best.url });
+        if (best?.url) media.push({ kind: "video", index: i, url: best.url, ...size });
       }
     });
 
@@ -173,7 +210,8 @@ export function toOrigPhoto(u: string): string {
     const fmtMatch = url.pathname.match(/\.(jpg|jpeg|png|webp)$/i);
     if (fmtMatch) {
       const fmt = fmtMatch[1].toLowerCase();
-      const base = url.origin + url.pathname.replace(/\.(jpg|jpeg|png|webp)$/i, "");
+      const base =
+        url.origin + url.pathname.replace(/\.(jpg|jpeg|png|webp)$/i, "");
       return `${base}?format=${fmt === "jpeg" ? "jpg" : fmt}&name=orig`;
     }
     url.searchParams.set("name", "orig");
@@ -196,7 +234,11 @@ export function extFromUrl(u: string): string | null {
 }
 
 export function sanitizeUsername(s: string): string {
-  return String(s || "unknown").replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 60) || "unknown";
+  return (
+    String(s || "unknown")
+      .replace(/[^a-zA-Z0-9_\-]/g, "_")
+      .slice(0, 60) || "unknown"
+  );
 }
 
 export function allMediaDownloaded(b: Bookmark): boolean {
@@ -219,30 +261,77 @@ export function allMediaDownloaded(b: Bookmark): boolean {
  */
 export type DeleteBookmarkResult = "removed" | "already-gone";
 
+/**
+ * Build the header set for a bookmark mutation POST.
+ *
+ * Prefers the headers we captured from the user's real browser request
+ * (includes anti-abuse fingerprint values like `x-client-uuid` and
+ * `x-client-transaction-id` that X expects). Falls back to a minimal set if
+ * we don't have a capture yet — that path is the one observed to 404 on
+ * CreateBookmark for accounts where X enforces these headers.
+ *
+ * Always overrides authorization + x-csrf-token with the freshest captured
+ * auth, since those rotate more frequently than the per-mutation header set.
+ */
+function buildMutationHeaders(
+  captured: Captured,
+  hdrs: Record<string, string> | null | undefined,
+): Record<string, string> {
+  if (hdrs && Object.keys(hdrs).length > 0) {
+    const merged: Record<string, string> = { ...hdrs };
+    if (captured.auth?.authorization)
+      merged.authorization = captured.auth.authorization;
+    if (captured.auth?.csrf) merged["x-csrf-token"] = captured.auth.csrf;
+    // Ensure content-type and accept are sensible defaults if the capture
+    // missed them for any reason.
+    if (!merged["content-type"]) merged["content-type"] = "application/json";
+    if (!merged.accept) merged.accept = "*/*";
+    return merged;
+  }
+  return {
+    authorization: captured.auth?.authorization ?? "",
+    "x-csrf-token": captured.auth?.csrf ?? "",
+    "x-twitter-active-user": "yes",
+    "x-twitter-auth-type": "OAuth2Session",
+    "x-twitter-client-language": "en",
+    "content-type": "application/json",
+    accept: "*/*",
+  };
+}
+
 export async function deleteBookmark(
   tweetId: string,
   queryId: string,
   captured: Captured,
 ): Promise<DeleteBookmarkResult> {
   if (!captured.auth) throw new Error("No auth");
-  const url = `https://x.com/i/api/graphql/${queryId}/DeleteBookmark`;
-  const body = JSON.stringify({
-    variables: { tweet_id: tweetId },
-    queryId,
-  });
+  // Prefer the exact URL the user's browser used — strips us of any wrong
+  // assumptions about path shape, query params, etc. Fall back to constructing
+  // from queryId only if we never captured the real URL.
+  const url = captured.deleteBookmarkUrl
+    ? captured.deleteBookmarkUrl
+    : `https://x.com/i/api/graphql/${queryId}/DeleteBookmark`;
+  // Body shape: if we have a captured template (from the user's own browser
+  // sending a real DeleteBookmark request), copy it and only substitute the
+  // tweet_id. Falls back to the minimal shape if no template exists — this
+  // is the path that historically returned "_Missing" for some accounts.
+  let bodyObj: Record<string, unknown>;
+  if (captured.deleteBookmarkBody) {
+    const tmpl = captured.deleteBookmarkBody;
+    const vars =
+      tmpl.variables && typeof tmpl.variables === "object"
+        ? { ...(tmpl.variables as Record<string, unknown>), tweet_id: tweetId }
+        : { tweet_id: tweetId };
+    bodyObj = { ...tmpl, variables: vars };
+  } else {
+    bodyObj = { variables: { tweet_id: tweetId }, queryId };
+  }
+  const body = JSON.stringify(bodyObj);
   const res = await fetch(url, {
     method: "POST",
     credentials: "include",
-    referrer: "https://x.com/i/bookmarks",
-    headers: {
-      authorization: captured.auth.authorization,
-      "x-csrf-token": captured.auth.csrf,
-      "x-twitter-active-user": "yes",
-      "x-twitter-auth-type": "OAuth2Session",
-      "x-twitter-client-language": "en",
-      "content-type": "application/json",
-      accept: "*/*",
-    },
+    referrer: "https://x.com/i/history",
+    headers: buildMutationHeaders(captured, captured.deleteBookmarkHeaders),
     body,
   });
   if (res.status === 404) {
@@ -260,7 +349,10 @@ export async function deleteBookmark(
   if (!res.ok) {
     throw new Error(`DeleteBookmark HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
-  let j: { data?: unknown; errors?: Array<{ message?: string; code?: number }> } | null = null;
+  let j: {
+    data?: unknown;
+    errors?: Array<{ message?: string; code?: number }>;
+  } | null = null;
   try {
     j = text ? JSON.parse(text) : null;
   } catch {
@@ -286,6 +378,71 @@ export async function deleteBookmark(
   // multiple data-shape variants for this mutation over the years.
   if (j?.data != null) return "removed";
   throw new Error(`DeleteBookmark unrecognised payload: ${text.slice(0, 200)}`);
+}
+
+/**
+ * Call X's CreateBookmark mutation to add a bookmark. Used by the ghost-fix
+ * flow: when DeleteBookmark says a tweet isn't bookmarked but it's appearing
+ * in the bookmarks LIST, we add it (forcing the bookmark store to know about
+ * it) so the subsequent DeleteBookmark can actually remove it.
+ *
+ * Uses a captured request body template (from a real CreateBookmark POST the
+ * user's own browser made) — same reasoning as deleteBookmark above.
+ */
+export async function createBookmark(
+  tweetId: string,
+  queryId: string,
+  captured: Captured,
+): Promise<boolean> {
+  if (!captured.auth) throw new Error("No auth");
+  const url = captured.createBookmarkUrl
+    ? captured.createBookmarkUrl
+    : `https://x.com/i/api/graphql/${queryId}/CreateBookmark`;
+  let bodyObj: Record<string, unknown>;
+  if (captured.createBookmarkBody) {
+    const tmpl = captured.createBookmarkBody;
+    const vars =
+      tmpl.variables && typeof tmpl.variables === "object"
+        ? { ...(tmpl.variables as Record<string, unknown>), tweet_id: tweetId }
+        : { tweet_id: tweetId };
+    bodyObj = { ...tmpl, variables: vars };
+  } else {
+    bodyObj = { variables: { tweet_id: tweetId }, queryId };
+  }
+  const body = JSON.stringify(bodyObj);
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "include",
+    referrer: "https://x.com/i/history",
+    headers: buildMutationHeaders(captured, captured.createBookmarkHeaders),
+    body,
+  });
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    throw new Error(
+      `CreateBookmark HTTP ${res.status} (URL=${url}): ${text.slice(0, 300) || "<empty body>"}`,
+    );
+  }
+  let j: {
+    data?: unknown;
+    errors?: Array<{ message?: string; code?: number }>;
+  } | null = null;
+  try {
+    j = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error(`CreateBookmark non-JSON response: ${text.slice(0, 200)}`);
+  }
+  if (j?.errors?.length) {
+    // X returns "AlreadyBookmarked" or similar if the tweet is already in the
+    // bookmark store. For our purposes that means the store has it, so the
+    // subsequent DeleteBookmark should now actually find it — treat as ok.
+    const e = j.errors[0];
+    if (/already/i.test(e?.message ?? "")) return true;
+    throw new Error(
+      `CreateBookmark X error${e?.code != null ? ` (code ${e.code})` : ""}: ${e?.message || "unknown"}`,
+    );
+  }
+  return j?.data != null;
 }
 
 export type { ParsedTweet };

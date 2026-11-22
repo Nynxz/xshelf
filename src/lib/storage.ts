@@ -1,4 +1,4 @@
-import type { Captured, Manifest, PendingMediaItem, RuntimeState, SourceKey } from "./types";
+import type { Captured, Manifest, PendingMediaItem, RuntimeState, SourceKey, VerifyReport } from "./types";
 
 const RUN_STATE_KEY = "xbd_runState";
 const CAPTURED_KEY = "xbd_captured_v1";
@@ -13,6 +13,12 @@ const SOURCES_KEY = "xbd_sources";
  * item. Map of `id` → ISO timestamp of when we unbookmarked it.
  */
 const CLEANUP_TOMBSTONES_KEY = "xbd_cleanup_tombstones";
+/**
+ * Latest Verify report per source. Kept in storage (not just popup state)
+ * because a verify of a large archive outlives the popup: it closes on any
+ * click elsewhere, and the result would otherwise be lost.
+ */
+const VERIFY_REPORTS_KEY = "xbd_verify_reports";
 /** Per-source manifest key prefix. Final key e.g. `xbd_manifest_bookmarks`,
  *  `xbd_manifest_user_elonmusk` (the colon in `user:<handle>` is replaced by `_`). */
 const MANIFEST_PREFIX = "xbd_manifest_";
@@ -136,7 +142,7 @@ export async function loadCaptured(): Promise<Captured> {
   const stored = data[CAPTURED_KEY] as
     | (Partial<Captured> & { queryId?: string | null; operation?: string | null })
     | undefined;
-  if (!stored) return { auth: null, endpoints: {} };
+  if (!stored) return { auth: null, endpoints: {}, userMedia: {} };
 
   const endpoints: Captured["endpoints"] = { ...(stored.endpoints ?? {}) };
   // Migrate legacy flat fields ({queryId, operation}) → endpoints.Bookmarks.
@@ -144,9 +150,15 @@ export async function loadCaptured(): Promise<Captured> {
     endpoints.Bookmarks = { queryId: stored.queryId };
   }
 
+  // Spread `stored` first so every captured field survives a service-worker
+  // restart — the mutation body/URL/header templates and the per-variant
+  // UserMedia requests all live here, and dropping them means the Cleanup and
+  // media-filter flows silently fall back to guessed requests.
   return {
+    ...stored,
     auth: stored.auth ?? null,
     endpoints,
+    userMedia: stored.userMedia ?? {},
   };
 }
 
@@ -192,4 +204,21 @@ export async function wipeAll(): Promise<void> {
   } catch {
     // not all browsers support session storage
   }
+}
+
+export async function loadVerifyReports(): Promise<Record<string, VerifyReport>> {
+  const data = await chrome.storage.local.get(VERIFY_REPORTS_KEY);
+  return (data[VERIFY_REPORTS_KEY] as Record<string, VerifyReport> | undefined) ?? {};
+}
+
+export async function saveVerifyReport(report: VerifyReport): Promise<void> {
+  const all = await loadVerifyReports();
+  all[report.source] = report;
+  await chrome.storage.local.set({ [VERIFY_REPORTS_KEY]: all });
+}
+
+export async function clearVerifyReport(source: SourceKey): Promise<void> {
+  const all = await loadVerifyReports();
+  delete all[source];
+  await chrome.storage.local.set({ [VERIFY_REPORTS_KEY]: all });
 }

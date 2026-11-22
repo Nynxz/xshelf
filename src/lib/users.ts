@@ -1,4 +1,4 @@
-import type { Captured } from "./types";
+import type { Captured, CapturedGraphQLRequest } from "./types";
 
 // Features blob inferred from current X web requests; tweaks-tolerant.
 const USER_BY_SCREEN_NAME_FEATURES = {
@@ -98,18 +98,45 @@ export interface FetchUserTweetsArgs {
   cursor: string | null;
   captured: Captured;
   host?: string;
+  /**
+   * A real request the browser made for this exact timeline view. When present
+   * its queryId / variables / features / fieldToggles are replayed verbatim
+   * (only `userId` and `cursor` are substituted), which is how we follow X's
+   * media-tab filters without hardcoding whatever flag drives them.
+   */
+  template?: CapturedGraphQLRequest;
 }
 
+/** Variables we always own, regardless of what the captured template carried. */
+function applyOwnedVariables(
+  variables: Record<string, unknown>,
+  userId: string,
+  cursor: string | null,
+): Record<string, unknown> {
+  const v: Record<string, unknown> = { ...variables, userId };
+  // A captured request may carry the cursor the browser was on mid-scroll —
+  // replaying that would start our crawl in the middle of the timeline.
+  if (cursor) v.cursor = cursor;
+  else delete v.cursor;
+  return v;
+}
+
+/**
+ * `operation` is only the fallback path segment: when `args.template` is set
+ * (the normal case for media views) the captured operation wins, because X now
+ * serves each media filter under its own operation name and we have no way to
+ * derive it.
+ */
 async function fetchUserGraphQLPage(
-  operation: "UserTweets" | "UserMedia",
+  operation: string,
   args: FetchUserTweetsArgs,
 ): Promise<unknown> {
-  const { userId, queryId, cursor, captured, host = "x.com" } = args;
+  const { userId, queryId, cursor, captured, host = "x.com", template } = args;
   if (!captured.auth) throw new Error("No auth");
   // Variable shape mirrors what x.com's web client sends. Some of these flags
   // (withClientEventToken, withBirdwatchNotes) are tolerated for the initial
   // request but cause cursor-based follow-ups to return empty pages if missing.
-  const variables: Record<string, unknown> = {
+  const defaultVariables: Record<string, unknown> = {
     userId,
     count: 20,
     includePromotedContent: false,
@@ -118,13 +145,25 @@ async function fetchUserGraphQLPage(
     withVoice: true,
     withV2Timeline: true,
   };
-  if (cursor) variables.cursor = cursor;
-  const url = new URL(`https://${host}/i/api/graphql/${queryId}/${operation}`);
+  const variables = applyOwnedVariables(
+    template?.variables ?? defaultVariables,
+    userId,
+    cursor,
+  );
+  const opPath = template?.operation ?? operation;
+  const opQueryId = template?.queryId ?? queryId;
+  const url = new URL(`https://${host}/i/api/graphql/${opQueryId}/${opPath}`);
   url.searchParams.set("variables", JSON.stringify(variables));
-  url.searchParams.set("features", JSON.stringify(USER_TWEETS_FEATURES));
+  url.searchParams.set(
+    "features",
+    JSON.stringify(template?.features ?? USER_TWEETS_FEATURES),
+  );
   // X's web client also sends a fieldToggles param; some queryId rotations
   // require it for cursor-based pagination to return new content.
-  url.searchParams.set("fieldToggles", JSON.stringify({ withArticlePlainText: false }));
+  url.searchParams.set(
+    "fieldToggles",
+    JSON.stringify(template?.fieldToggles ?? { withArticlePlainText: false }),
+  );
 
   const res = await fetch(url.toString(), {
     method: "GET",
@@ -146,7 +185,7 @@ async function fetchUserGraphQLPage(
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`${operation} failed: HTTP ${res.status}. ${body.slice(0, 200)}`);
+    throw new Error(`${opPath} failed: HTTP ${res.status}. ${body.slice(0, 200)}`);
   }
   return res.json();
 }
@@ -155,6 +194,12 @@ export function fetchUserTweetsPage(args: FetchUserTweetsArgs): Promise<unknown>
   return fetchUserGraphQLPage("UserTweets", args);
 }
 
+/**
+ * A page of a profile media timeline. With a template this replays whatever
+ * operation the browser used (`UserPhotoTimeline`, …); without one it falls
+ * back to the legacy `UserMedia` name and our hardcoded variables/features,
+ * which X may no longer accept.
+ */
 export function fetchUserMediaPage(args: FetchUserTweetsArgs): Promise<unknown> {
   return fetchUserGraphQLPage("UserMedia", args);
 }
@@ -169,7 +214,45 @@ export interface ExtractedUserPage {
    */
   stopOnEmptyResponse?: boolean;
   /** Diagnostic counts for the run-log: helps tell extractor bugs from parser bugs. */
-  raw?: { items: number; modules: number; cursors: number; other: number };
+  raw?: {
+    items: number;
+    modules: number;
+    cursors: number;
+    other: number;
+    /**
+     * How many of each `itemContent.itemType` we saw. When X reshapes a
+     * timeline, "20 items → 0 downloads" and "20 items of a type we don't
+     * parse" are indistinguishable in the log without this.
+     */
+    itemTypes?: Record<string, number>;
+    /** True when the known response paths missed and we fell back to a scan. */
+    deepScan?: boolean;
+  };
+}
+
+/**
+ * Last-resort scan for a timeline's `instructions` array. X moves the wrapper
+ * key when it renames an operation (`timeline` → `timeline_v2` → whatever
+ * `UserPhotoTimeline` returns), and a crawl that yields nothing because of a
+ * renamed wrapper looks exactly like an empty archive. Breadth-first and
+ * bounded so a pathological response can't stall the service worker.
+ */
+function findInstructionsDeep(json: unknown): unknown[] | null {
+  const queue: unknown[] = [json];
+  let visited = 0;
+  while (queue.length > 0 && visited < 5000) {
+    const node = queue.shift();
+    visited++;
+    if (!node || typeof node !== "object") continue;
+    if (Array.isArray(node)) {
+      for (const v of node) queue.push(v);
+      continue;
+    }
+    const rec = node as Record<string, unknown>;
+    if (Array.isArray(rec.instructions)) return rec.instructions;
+    for (const v of Object.values(rec)) queue.push(v);
+  }
+  return null;
 }
 
 export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
@@ -193,15 +276,35 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
   };
   const result = j?.data?.user?.result;
   const root = result?.timeline_v2 ?? result?.timeline;
-  const instructions =
-    root?.timeline?.instructions ??
-    root?.instructions ??
-    [];
+  let deepScan = false;
+  let instructions = root?.timeline?.instructions ?? root?.instructions;
+  if (!Array.isArray(instructions)) {
+    const found = findInstructionsDeep(json);
+    if (found) {
+      instructions = found;
+      deepScan = true;
+    } else {
+      instructions = [];
+    }
+  }
 
   const flat: unknown[] = [];
   let nextCursor: string | null = null;
   let stopOnEmptyResponse = false;
-  const raw = { items: 0, modules: 0, cursors: 0, other: 0 };
+  const itemTypes: Record<string, number> = {};
+  const raw: NonNullable<ExtractedUserPage["raw"]> = {
+    items: 0,
+    modules: 0,
+    cursors: 0,
+    other: 0,
+    itemTypes,
+    deepScan,
+  };
+
+  function noteItemType(itemContent: unknown): void {
+    const t = (itemContent as { itemType?: string } | null)?.itemType ?? "?";
+    itemTypes[t] = (itemTypes[t] ?? 0) + 1;
+  }
 
   type AnyEntry = {
     content?: {
@@ -231,6 +334,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
     }
     if (c.entryType === "TimelineTimelineItem") {
       raw.items++;
+      noteItemType(c.itemContent);
       flat.push(entry);
       return;
     }
@@ -239,6 +343,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
       for (const mi of c.items) {
         const itemContent = mi?.item?.itemContent;
         if (!itemContent) continue;
+        noteItemType(itemContent);
         // Re-wrap as a TimelineTimelineItem-shaped entry. parseTweetEntry only
         // looks at content.itemContent, so this is enough.
         flat.push({ content: { entryType: "TimelineTimelineItem", itemContent } });
@@ -260,7 +365,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
     moduleEntryId?: string;
   };
 
-  for (const ins of instructions as Instruction[]) {
+  for (const ins of instructions as unknown as Instruction[]) {
     if (ins.type === "TimelineAddEntries" && Array.isArray(ins.entries)) {
       for (const e of ins.entries) consume(e);
     } else if (ins.type === "TimelinePinEntry" && ins.entry) {
@@ -273,6 +378,7 @@ export function extractUserTweetsEntries(json: unknown): ExtractedUserPage {
       for (const mi of ins.moduleItems) {
         const itemContent = mi?.item?.itemContent;
         if (!itemContent) continue;
+        noteItemType(itemContent);
         flat.push({ content: { entryType: "TimelineTimelineItem", itemContent } });
       }
     }

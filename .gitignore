@@ -7,4 +7,6 @@ dist
 build
 src/snapshot/dist
 src/master/dist
-public
+src/shelf/dist
+# Root-level only: src/public holds the committed extension icons.
+/public
